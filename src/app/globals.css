@@ -24,3 +24,20 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* Safe area for notched phones and browser bottom bar */
+@supports (padding-bottom: env(safe-area-inset-bottom)) {
+  .pb-safe {
+    padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+  }
+}
+
+/* Reserve space for fixed footer (use as min-height on spacer element) */
+.pager-footer-spacer {
+  min-height: max(4rem, calc(env(safe-area-inset-bottom, 0px) + 3.5rem));
+}
+
+/* Fixed footer: sit above browser bottom nav (like Next.js dev indicator) */
+.pager-footer-fixed {
+  padding-bottom: max(1rem, env(safe-area-inset-bottom));
+}
