@@ -1,21 +1,22 @@
 "use client";
 
 import { useParams } from "next/navigation";
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useLayoutEffect, useState, useRef } from "react";
 import { supabase } from "@/lib/supabase";
 import { getMerchant } from "@/lib/merchant";
 import type { Merchant } from "@/types/merchant";
 
 type PagerStatus = "waiting" | "ready" | "completed";
 
-// Layout: matched to SVG spec (viewBox 375×812) – content y 95.77→659.89, bottom bar 73.47
+// Layout: main section fills space above fixed-height footer; no scroll (100dvh locked).
 const MAIN_CLASS = "flex flex-1 min-h-0 flex-col overflow-hidden";
-const FOOTER_SPACER_CLASS = "shrink-0 pager-footer-spacer w-full";
-// From SVG: content top 95.77; LOGO_BRAND y≈217 → 121px from content top; #011 baseline 601.13, bar at 659.89
-const BRAND_TOP_PX = 61;
+// Footer: ad 170px + gap 8px + powered-by 40px + vertical padding 16px = 234px (+ safe area in CSS)
+const FOOTER_HEIGHT_PX = 234;
+// From SVG: content top 95.77; LOGO_BRAND y≈217 → 121px from content top; #011 baseline 601.13, bar at 659.89. Reduced 40px so 1–4 sit higher.
+const BRAND_TOP_PX = 21;
 const BRAND_LOGO_MAX_H_PX = 56;
 const ORDER_NUM_BOTTOM_PX = 16;
-const GAP_1_2_REDUCTION_PX = 36; // gap between 1 & 2 (higher = less negative = block lower; was 86, +50px = 36)
+const GAP_1_2_REDUCTION_PX = 76; // gap between 1 & 2 (higher = more negative = items 2–4 move up; was 36, +40px)
 const MAIN_SUB_UP_PX = -122; // main copy (2) and sub-copy (3) offset down (marginTop = 122px)
 // Typography (SVG: order # 46.53px, sub 13.19; we keep title 25px, order # 47px, sub 13px for closer match)
 const ORDER_NUM_CLASS = "text-[47px] font-bold tabular-nums leading-none";
@@ -54,17 +55,92 @@ function PagerBrandBlock({
   );
 }
 
-function PagerFooter({ borderClass = "border-zinc-700" }: { borderClass?: string }) {
+function PagerFooter({
+  borderClass = "border-transparent",
+  promoBannerUrl,
+  bannerLink,
+}: {
+  borderClass?: string;
+  promoBannerUrl?: string | null;
+  bannerLink?: string | null;
+}) {
+  const bannerImgUrl = promoBannerUrl?.trim() || null;
+  const linkUrl = bannerLink?.trim() || null;
+  const adContent = bannerImgUrl ? (
+    linkUrl ? (
+      <a
+        href={linkUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="relative block h-[170px] w-full overflow-hidden bg-zinc-900"
+      >
+        <img
+          src={bannerImgUrl}
+          alt=""
+          className="h-full w-full object-contain object-center"
+          referrerPolicy="no-referrer"
+        />
+      </a>
+    ) : (
+      <div className="relative block h-[170px] w-full overflow-hidden bg-zinc-900">
+        <img
+          src={bannerImgUrl}
+          alt=""
+          className="h-full w-full object-contain object-center"
+          referrerPolicy="no-referrer"
+        />
+      </div>
+    )
+  ) : (
+    <a
+      href="https://example.com"
+      target="_blank"
+      rel="noopener noreferrer"
+      className="relative block h-[170px] w-full overflow-hidden"
+    >
+      <div className="absolute inset-0 bg-gradient-to-r from-amber-400 to-sky-400" />
+      <div className="relative flex h-full w-full items-center justify-between px-4">
+        <div className="flex flex-col">
+          <span className="text-xs font-semibold uppercase tracking-wide text-zinc-900">
+            New to Delivery?
+          </span>
+          <span className="mt-1 text-3xl font-extrabold leading-none text-zinc-900">
+            50% OFF
+          </span>
+          <span className="mt-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-900">
+            your first order
+          </span>
+        </div>
+        <div className="ml-3 flex h-16 w-20 items-center justify-center rounded-md bg-white/90 text-[10px] font-semibold uppercase tracking-wide text-black">
+          Tap to claim
+        </div>
+      </div>
+    </a>
+  );
+
   return (
     <footer
-      className={`fixed bottom-0 left-0 right-0 z-10 flex h-14 items-center justify-center border-t ${borderClass} bg-black pt-2 pager-footer-fixed`}
+      className={`shrink-0 border-t ${borderClass} bg-black pb-safe`}
+      style={{ height: `calc(${FOOTER_HEIGHT_PX}px + env(safe-area-inset-bottom, 0px))` }}
     >
-      <img
-        src="/qready-logo.png"
-        alt="Qready"
-        className="h-7 w-auto max-w-[120px] object-contain object-center"
-        referrerPolicy="no-referrer"
-      />
+      <div className="mx-auto flex w-full max-w-[375px] flex-col px-0 pt-0 pb-2">
+        {/* Ad area – custom banner or placeholder; ~375×170px */}
+        {adContent}
+
+        {/* Powered by bar – ~375×40px */}
+        <div className="flex h-10 w-full items-center justify-between rounded-md bg-zinc-950 px-3 text-[11px] text-black">
+          <span className="uppercase tracking-wide">Ad</span>
+          <div className="flex items-center gap-1.5">
+            <span className="uppercase tracking-wide text-[10px]">Powered by</span>
+            <img
+              src="/qready-logo.png"
+              alt="QReady"
+              className="h-4 w-auto max-w-[80px] object-contain object-center"
+              referrerPolicy="no-referrer"
+            />
+          </div>
+        </div>
+      </div>
     </footer>
   );
 }
@@ -78,8 +154,15 @@ export default function PagerPage() {
   const [acknowledged, setAcknowledged] = useState(false);
   const [thankYou, setThankYou] = useState(false);
   const [merchant, setMerchant] = useState<Merchant | null>(null);
+  const [fetchError, setFetchError] = useState<string | null>(null);
   const hasPlayedRef = useRef(false);
   const audioContextRef = useRef<AudioContext | null>(null);
+  /** Once customer has seen "Your order is ready", don't show "You are in the queue" again when staff clicks Collected. */
+  const hasBeenReadyRef = useRef(false);
+  const [hasSeenReady, setHasSeenReady] = useState(() =>
+    typeof window !== "undefined" && id ? sessionStorage.getItem(`pager-seen-ready-${id}`) === "1" : false
+  );
+  const [thankYouCloseUrl, setThankYouCloseUrl] = useState<string | null>(null);
 
   // Lock viewport: no page scroll so footer logo is always visible
   useEffect(() => {
@@ -131,17 +214,27 @@ export default function PagerPage() {
   // Fetch latest pager from server (used on load and when page becomes visible again after lock/tab switch)
   async function refetchPager() {
     if (!id) return;
+    setFetchError(null);
     const { data, error } = await supabase
       .from("pagers")
       .select("order_number, status, merchant_id")
       .eq("id", id)
       .single();
     if (error) {
-      console.error("Error fetching pager:", error);
+      const msg = (error as { message?: string }).message ?? String(error);
+      const code = (error as { code?: string }).code;
+      console.error("Error fetching pager:", msg, code ? `(${code})` : "", error);
+      setFetchError(msg || "Could not load your order");
       return;
     }
     setOrderNumber(data.order_number);
-    setStatus(data.status as PagerStatus);
+    // When staff already clicked Collected: do NOT set status to "completed" — only set Thank You so we never show queue.
+    if (data.status === "completed" && hasBeenReadyRef.current) {
+      setThankYou(true);
+      // leave status as-is (keep "ready") so UI keeps showing thank you
+    } else {
+      setStatus(data.status as PagerStatus);
+    }
     const mid = data.merchant_id ?? "default";
     getMerchant(mid).then(setMerchant);
     // If we just discovered we're ready (e.g. after waking phone), play sound after short delay so browser allows it
@@ -149,7 +242,7 @@ export default function PagerPage() {
       setTimeout(() => {
         if (hasPlayedRef.current) return;
         hasPlayedRef.current = true;
-        document.title = "Qready";
+        document.title = "QReady";
         playReadyAlert();
       }, 250);
     }
@@ -166,7 +259,13 @@ export default function PagerPage() {
         "postgres_changes",
         { event: "UPDATE", schema: "public", table: "pagers", filter: `id=eq.${id}` },
         (payload) => {
-          const newStatus = payload.new?.status as PagerStatus;
+          const newStatus = payload?.new?.status as PagerStatus | undefined;
+          if (newStatus !== "waiting" && newStatus !== "ready" && newStatus !== "completed") return;
+          // When staff click Collected: do NOT set status to "completed" — only set Thank You so we stay on thank-you screen (avoids any race with ref/state).
+          if (newStatus === "completed" && hasBeenReadyRef.current) {
+            setThankYou(true);
+            return;
+          }
           setStatus(newStatus);
         }
       )
@@ -189,7 +288,34 @@ export default function PagerPage() {
     return () => document.removeEventListener("visibilitychange", onVisibility);
   }, [id]);
 
-  // When status becomes "ready": if tab is visible, play now; else update title so they see it when they switch back
+  // Keep ref in sync for realtime/refetch callbacks (they read the ref in closures).
+  hasBeenReadyRef.current = hasBeenReadyRef.current || hasSeenReady;
+
+  // Mark that we've seen ready as soon as we show the ready screen (runs before paint). Persist so remounts (e.g. tab switch) don't forget.
+  useLayoutEffect(() => {
+    if (status === "ready" && started && id) {
+      hasBeenReadyRef.current = true;
+      setHasSeenReady(true);
+      try {
+        sessionStorage.setItem(`pager-seen-ready-${id}`, "1");
+      } catch {
+        // ignore
+      }
+    }
+  }, [status, started, id]);
+
+  // When showing thank you and merchant has no close_btn_url, try fetching it once (avoids overwriting merchant)
+  useEffect(() => {
+    const showingThankYou = thankYou || (status === "completed" && (hasSeenReady || hasBeenReadyRef.current));
+    if (!showingThankYou || !merchant?.id) return;
+    if (merchant.close_btn_url?.trim()) return;
+    getMerchant(merchant.id).then((m) => {
+      const url = m.close_btn_url?.trim() || null;
+      if (url) setThankYouCloseUrl(url);
+    });
+  }, [thankYou, status, hasSeenReady, merchant?.id, merchant?.close_btn_url]);
+
+  // When status becomes "ready": play alert
   useEffect(() => {
     if (status !== "ready" || !started || hasPlayedRef.current) return;
 
@@ -220,14 +346,34 @@ export default function PagerPage() {
   }
 
   if (orderNumber === null || status === null || merchant === null) {
+    if (fetchError) {
+      return (
+        <div className="flex h-[100dvh] min-h-0 flex-col items-center justify-center overflow-hidden bg-zinc-900 px-6 text-white">
+          <p className="text-center text-zinc-300">{fetchError}</p>
+          <button
+            type="button"
+            onClick={() => refetchPager()}
+            className="mt-6 rounded-full bg-white px-8 py-3 text-sm font-semibold text-zinc-900 hover:bg-zinc-100"
+          >
+            Try again
+          </button>
+        </div>
+      );
+    }
     return (
-      <div className="flex h-screen min-h-0 flex-col items-center justify-center overflow-hidden bg-zinc-900 text-white">
+      <div className="flex h-[100dvh] min-h-0 flex-col items-center justify-center overflow-hidden bg-zinc-900 text-white">
         <p>Loading…</p>
       </div>
     );
   }
 
-  const businessName = merchant.business_name?.trim() || "BURGER Shack";
+  // When staff click Collected (status === "completed") and customer had seen "Your order is ready", show Thank You — never show queue again. Use ref so we don't rely on effect timing.
+  const hadSeenReady = hasSeenReady || hasBeenReadyRef.current || (status === "ready" && started);
+  if (status === "ready" && started) hasBeenReadyRef.current = true;
+  const showThankYou = thankYou || (status === "completed" && hadSeenReady);
+  const displayStatus: PagerStatus = status === "completed" && hadSeenReady ? "ready" : status;
+
+  const businessName = merchant.business_name?.trim() || "YOUR BUSINESS";
   const tagline = merchant.business_tagline?.trim() || "";
   const logoUrl = merchant.logo_url?.trim() || null;
   const bgColour = merchant.colour_background?.trim() || undefined;
@@ -238,90 +384,97 @@ export default function PagerPage() {
   const msgThankyou = merchant.message_thankyou?.trim() || "Thank you for your order";
   const closeText = merchant.close_btn_text?.trim() || "Close";
   const closeUrl = merchant.close_btn_url?.trim() || null;
+  const promoBannerUrl = merchant.promo_banner_url?.trim() || null;
+  const promoBannerLink = merchant.promo_banner_link?.trim() || null;
+  const bannerLink = promoBannerLink || closeUrl;
 
-  // UI_04: Thank you + CLOSE (background colour; brand on bg; consistent layout)
-  if (thankYou) {
+  const isLightBg = (hex: string) => {
+    const h = hex.replace(/^#/, "");
+    if (h.length !== 6) return false;
+    const r = parseInt(h.slice(0, 2), 16) / 255;
+    const g = parseInt(h.slice(2, 4), 16) / 255;
+    const b = parseInt(h.slice(4, 6), 16) / 255;
+    const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+    return luminance > 0.5;
+  };
+  const onMyWayBgHex = waitingColour || "#1e4ed8";
+  const onMyWayTextClass = isLightBg(onMyWayBgHex) ? "text-zinc-900" : "text-white";
+  const closeBtnTextColor = waitingColour
+    ? (isLightBg(waitingColour) ? "#171717" : waitingColour)
+    : "#171717";
+
+  const effectiveCloseUrl = closeUrl || thankYouCloseUrl;
+  function handleThankYouButton() {
+    if (effectiveCloseUrl) {
+      window.open(effectiveCloseUrl, "_blank", "noopener,noreferrer");
+    }
+    window.close();
+  }
+
+  // UI_04: Thank you + CLOSE (background colour; brand on bg; consistent layout). Also when staff clicked Collected and customer had seen ready.
+  if (showThankYou) {
     const thankYouBg = bgColour ? { backgroundColor: bgColour } : undefined;
     return (
-      <div className="flex h-screen min-h-0 flex-col overflow-hidden text-white" style={thankYouBg || { backgroundColor: "#171717" }}>
+      <div className="flex h-[100dvh] min-h-0 flex-col overflow-hidden text-white" style={thankYouBg || { backgroundColor: "#171717" }}>
         <main className={MAIN_CLASS} style={thankYouBg}>
           <PagerBrandBlock logoUrl={logoUrl} businessName={businessName} tagline={tagline} />
           <div className="flex min-h-0 flex-1 flex-col" style={{ marginTop: -GAP_1_2_REDUCTION_PX }}>
-            <div className="flex shrink-0 flex-col items-center justify-start px-6">
-              <div style={{ marginTop: -MAIN_SUB_UP_PX }}>
+<div className="flex shrink-0 flex-col items-center justify-start px-6">
+            <div className="flex flex-col items-center w-full" style={{ marginTop: -MAIN_SUB_UP_PX }}>
                 <h1 className={TITLE_CLASS} style={{ whiteSpace: "pre-line" }}>
-                  THANK YOU
-                  {"\n"}
-                  FOR
-                  {"\n"}
-                  YOUR ORDER
+                  {msgThankyou}
                 </h1>
-                {closeUrl ? (
-                <a
-                  href={closeUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className={`${BTN_CLASS} mt-5 bg-white text-emerald-600 no-underline`}
-                >
-                  {closeText.toUpperCase()}
-                </a>
-              ) : (
                 <button
                   type="button"
-                  onClick={() => window.close()}
-                  className={`${BTN_CLASS} mt-5 bg-white text-emerald-600`}
-              >
-                {closeText.toUpperCase()}
-              </button>
-            )}
+                  onClick={handleThankYouButton}
+                  className={`${BTN_CLASS} mt-5 bg-white`}
+                  style={{ color: closeBtnTextColor }}
+                >
+                  {closeText.toUpperCase()}
+                </button>
               </div>
             </div>
-            <div className="shrink-0 px-6 text-center" style={{ paddingBottom: ORDER_NUM_BOTTOM_PX, marginTop: 100 }}>
+            <div className="shrink-0 px-6 text-center" style={{ paddingBottom: ORDER_NUM_BOTTOM_PX, marginTop: 38 }}>
               <p className={ORDER_NUM_CLASS}>#{String(orderNumber).padStart(3, "0")}</p>
             </div>
             <div className="min-h-0 flex-1" aria-hidden />
-            <div className={FOOTER_SPACER_CLASS} aria-hidden />
           </div>
         </main>
-        <PagerFooter />
+        <PagerFooter promoBannerUrl={promoBannerUrl} bannerLink={bannerLink} />
       </div>
     );
   }
 
   // UI_03: Order ready – green, ON MY WAY (brand on bg; same layout)
-  if (status === "ready" && started) {
+  if (displayStatus === "ready" && started) {
     const readyBg = readyColour ? { backgroundColor: readyColour } : undefined;
     return (
-      <div className="flex h-screen min-h-0 flex-col overflow-hidden text-white" style={readyBg || { backgroundColor: "#5ec26a" }}>
+      <div className="flex h-[100dvh] min-h-0 flex-col overflow-hidden text-white" style={readyBg || { backgroundColor: "#5ec26a" }}>
         <main className={MAIN_CLASS} style={readyBg}>
           <PagerBrandBlock logoUrl={logoUrl} businessName={businessName} tagline={tagline} />
           <div className="flex min-h-0 flex-1 flex-col" style={{ marginTop: -GAP_1_2_REDUCTION_PX }}>
-            <div className="flex shrink-0 flex-col items-center justify-start px-6">
-              <div style={{ marginTop: -MAIN_SUB_UP_PX }}>
+<div className="flex shrink-0 flex-col items-center justify-start px-6">
+            <div className="flex flex-col items-center w-full" style={{ marginTop: -MAIN_SUB_UP_PX }}>
                 <h1 className={TITLE_CLASS} style={{ whiteSpace: "pre-line" }}>
-                  YOUR ORDER
-                  {"\n"}
-                  IS READY FOR
-                  {"\n"}
-                  COLLECTION
+                  {msgReady}
                 </h1>
                 <button
                   type="button"
                   onClick={handleOnMyWay}
-                  className={`${BTN_CLASS} mt-5 bg-white text-emerald-600`}
+                  className={`${BTN_CLASS} mt-5 ${onMyWayTextClass}`}
+                  style={waitingColour ? { backgroundColor: waitingColour } : { backgroundColor: "#1e4ed8" }}
                 >
                   ON MY WAY
                 </button>
               </div>
             </div>
-            <div className="shrink-0 px-6 text-center" style={{ paddingBottom: ORDER_NUM_BOTTOM_PX, marginTop: 100 }}>
+            <div className="shrink-0 px-6 text-center" style={{ paddingBottom: ORDER_NUM_BOTTOM_PX, marginTop: 38 }}>
               <p className={ORDER_NUM_CLASS}>#{String(orderNumber).padStart(3, "0")}</p>
             </div>
             <div className="min-h-0 flex-1" aria-hidden />
-            <div className={FOOTER_SPACER_CLASS} aria-hidden />
           </div>
         </main>
-        <PagerFooter borderClass="border-emerald-700" />
+        <PagerFooter promoBannerUrl={promoBannerUrl} bannerLink={bannerLink} />
       </div>
     );
   }
@@ -330,7 +483,7 @@ export default function PagerPage() {
   if (!started) {
     const startBg = bgColour ? { backgroundColor: bgColour } : undefined;
     return (
-      <div className="flex h-screen min-h-0 flex-col overflow-hidden text-white" style={startBg || { backgroundColor: "#171717" }}>
+      <div className="flex h-[100dvh] min-h-0 flex-col overflow-hidden text-white" style={startBg || { backgroundColor: "#171717" }}>
         <main
           className={MAIN_CLASS}
           style={startBg || { backgroundColor: "#171717" }}
@@ -344,54 +497,50 @@ export default function PagerPage() {
             <div className="flex shrink-0 flex-col items-center justify-start px-6">
               <div style={{ marginTop: -MAIN_SUB_UP_PX }}>
                 <h1 className={TITLE_CLASS} style={{ whiteSpace: "pre-line" }}>
-                  TAP
+                  TAP HERE
                   {"\n"}
-                  TO START
+                  TO SEE IF YOUR
                   {"\n"}
-                  PAGER
+                  ORDER IS READY...
                 </h1>
-                <p className={`${SUBTEXT_CLASS} mt-5`}>We will buzz you when it&apos;s ready.</p>
+                <p className={`${SUBTEXT_CLASS} mt-5`}>
+                  ...and we will <strong>BUZZ</strong> you when it is!
+                </p>
               </div>
             </div>
-            <div className="shrink-0 px-6 text-center" style={{ paddingBottom: ORDER_NUM_BOTTOM_PX, marginTop: 100 }}>
+            <div className="shrink-0 px-6 text-center" style={{ paddingBottom: ORDER_NUM_BOTTOM_PX, marginTop: 60 }}>
               <p className={ORDER_NUM_CLASS}>#{String(orderNumber).padStart(3, "0")}</p>
             </div>
             <div className="min-h-0 flex-1" aria-hidden />
-            <div className={FOOTER_SPACER_CLASS} aria-hidden />
           </div>
         </main>
-        <PagerFooter />
+        <PagerFooter promoBannerUrl={promoBannerUrl} bannerLink={bannerLink} />
       </div>
     );
   }
 
-  // UI_02: In the queue – keep tab open (brand on bg; same layout)
-  const waitingBg = waitingColour ? { backgroundColor: waitingColour } : undefined;
+  // UI_02: In the queue – background = brand (screens 1, 2, 4). Never show this if we've already shown ready (displayStatus stays "ready" after Collected).
+  const queueBg = bgColour ? { backgroundColor: bgColour } : undefined;
   return (
-    <div className="flex h-screen min-h-0 flex-col overflow-hidden text-white" style={waitingBg || { backgroundColor: "#1e4ed8" }}>
-      <main className={MAIN_CLASS} style={waitingBg}>
+    <div className="flex h-[100dvh] min-h-0 flex-col overflow-hidden text-white" style={queueBg || { backgroundColor: "#171717" }}>
+      <main className={MAIN_CLASS} style={queueBg}>
         <PagerBrandBlock logoUrl={logoUrl} businessName={businessName} tagline={tagline} />
         <div className="flex min-h-0 flex-1 flex-col" style={{ marginTop: -GAP_1_2_REDUCTION_PX }}>
           <div className="flex shrink-0 flex-col items-center justify-start px-6">
             <div style={{ marginTop: -MAIN_SUB_UP_PX }}>
               <h1 className={TITLE_CLASS} style={{ whiteSpace: "pre-line" }}>
-                YOU ARE
-                {"\n"}
-                IN THE
-                {"\n"}
-                QUEUE
+                {msgQueue}
               </h1>
               <p className={`${SUBTEXT_CLASS} mt-6 leading-tight`}>Keep this tab open. We will buzz you!</p>
             </div>
           </div>
-          <div className="shrink-0 px-6 text-center" style={{ paddingBottom: ORDER_NUM_BOTTOM_PX, marginTop: 100 }}>
+          <div className="shrink-0 px-6 text-center" style={{ paddingBottom: ORDER_NUM_BOTTOM_PX, marginTop: 60 }}>
             <p className={ORDER_NUM_CLASS}>#{String(orderNumber).padStart(3, "0")}</p>
           </div>
           <div className="min-h-0 flex-1" aria-hidden />
-        <div className={FOOTER_SPACER_CLASS} aria-hidden />
         </div>
       </main>
-      <PagerFooter borderClass="border-rose-700" />
+      <PagerFooter promoBannerUrl={promoBannerUrl} bannerLink={bannerLink} />
     </div>
   );
 }

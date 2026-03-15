@@ -1,9 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
-import { getDefaultMerchant, updateMerchant } from "@/lib/merchant";
-import { uploadLogo } from "@/lib/uploadLogo";
+import UserMenu from "@/components/UserMenu";
+import type { User } from "@supabase/supabase-js";
+import { getMerchantByUserId, createMerchantForUser, getOrCreateAnonymousMerchant, updateMerchant } from "@/lib/merchant";
+import { uploadLogo, uploadBanner } from "@/lib/uploadLogo";
 import type { Merchant } from "@/types/merchant";
 
 type Pager = {
@@ -27,26 +31,141 @@ const BAR_SEGMENT_COLORS = [
 ] as const;
 
 export default function DashboardPage() {
+  const router = useRouter();
   const [pagers, setPagers] = useState<Pager[]>([]);
   const [loading, setLoading] = useState(true);
+  const [authChecking, setAuthChecking] = useState(true);
   const [showNewOrder, setShowNewOrder] = useState(false);
   const [newPager, setNewPager] = useState<{ id: string; order_number: number } | null>(null);
-  // Manual base URL for QR (so customer phone can reach the app). Persisted in localStorage.
-  const [baseUrlOverride, setBaseUrlOverride] = useState("");
   const [merchant, setMerchant] = useState<Merchant | null>(null);
+  const [authUser, setAuthUser] = useState<User | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  useEffect(() => {
-    setBaseUrlOverride(localStorage.getItem(BASE_URL_KEY) || "");
-  }, []);
-  useEffect(() => {
-    getDefaultMerchant().then(setMerchant);
+  const [forceNextOrderOne, setForceNextOrderOne] = useState(false);
+  const [showChrome, setShowChrome] = useState(true);
+  const [isPhone, setIsPhone] = useState(false);
+  const [isPhoneLandscape, setIsPhoneLandscape] = useState(false);
+  const sessionUserIdRef = useRef<string | undefined>(undefined);
+
+  // Load merchant (and clear user-specific state) for the current session. Each user gets their own merchant and queue.
+  // When the same session refires (e.g. tab focus), don't clear merchant so we avoid a black "Loading" screen.
+  const loadForSession = useCallback(async (session: { user: User } | null) => {
+    const sessionKey = session?.user?.id ?? "anon";
+    const isSameSession = sessionUserIdRef.current === sessionKey;
+
+    if (isSameSession) {
+      setLoading(true);
+      let m: Merchant | null = null;
+      if (session?.user) {
+        setAuthUser(session.user);
+        m = await getMerchantByUserId(session.user.id);
+        if (!m) m = await createMerchantForUser(session.user.id);
+        setMerchant(m ?? null);
+      } else {
+        setAuthUser(null);
+        m = await getOrCreateAnonymousMerchant();
+        setMerchant(m);
+      }
+      if (m?.id) {
+        const { data } = await supabase
+          .from("pagers")
+          .select("*")
+          .eq("merchant_id", m.id)
+          .in("status", ["waiting", "ready"])
+          .order("order_number", { ascending: true });
+        setPagers(data ?? []);
+      }
+      setLoading(false);
+      return;
+    }
+
+    sessionUserIdRef.current = sessionKey;
+    setLoading(true);
+    setPagers([]);
+    setShowNewOrder(false);
+    setNewPager(null);
+    setForceNextOrderOne(false);
+    setMerchant(null);
+    if (session?.user) {
+      setAuthUser(session.user);
+      let m = await getMerchantByUserId(session.user.id);
+      if (!m) {
+        m = await createMerchantForUser(session.user.id);
+      }
+      setMerchant(m ?? null);
+    } else {
+      setAuthUser(null);
+      const m = await getOrCreateAnonymousMerchant();
+      setMerchant(m);
+    }
+    setLoading(false);
   }, []);
 
-  // Fetch pagers (waiting + ready only)
-  async function fetchPagers() {
+  // Decide whether to show top/bottom chrome based on viewport size so that phones (portrait or landscape)
+  // get a full-screen queue view, while tablets/desktops keep the bars. Also track phone-landscape layout.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const updateChromeVisibility = () => {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      const minSide = Math.min(w, h);
+      // Treat devices with their smallest side under 600px as phones; hide chrome there.
+      const phone = minSide < 600;
+      const landscape = w > h;
+      setShowChrome(!phone);
+      setIsPhone(phone);
+      setIsPhoneLandscape(phone && landscape);
+    };
+    updateChromeVisibility();
+    window.addEventListener("resize", updateChromeVisibility);
+    return () => window.removeEventListener("resize", updateChromeVisibility);
+  }, []);
+
+  // Auth: on mount and whenever auth changes, load merchant/queue for the current user so the dashboard is never showing another user's data.
+  // Only set authChecking false after loadForSession completes so we never show the app with merchant still null.
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!mounted) return;
+      await loadForSession(session);
+      if (mounted) setAuthChecking(false);
+    })();
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      if (!mounted) return;
+      // Only reload when session identity actually changed. Supabase can fire with null/stale session when tab is backgrounded or on return, which would clear orders.
+      const newKey = session?.user?.id ?? "anon";
+      if (newKey === sessionUserIdRef.current) return;
+      if (session == null) {
+        const { data: { session: current } } = await supabase.auth.getSession();
+        if (current?.user?.id && current.user.id === sessionUserIdRef.current) return;
+      }
+      await loadForSession(session);
+    });
+    // When user returns to this tab, re-read session from storage. Only reload if session actually changed.
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== "visible" || !mounted) return;
+      supabase.auth.getSession().then(({ data: { session } }) => {
+        if (!mounted) return;
+        const newKey = session?.user?.id ?? "anon";
+        if (newKey === sessionUserIdRef.current) return;
+        loadForSession(session);
+      });
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      mounted = false;
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      subscription.unsubscribe();
+    };
+  }, [loadForSession]);
+
+  // Fetch pagers for current merchant only
+  const fetchPagers = useCallback(async () => {
+    if (!merchant?.id) return;
     const { data, error } = await supabase
       .from("pagers")
       .select("*")
+      .eq("merchant_id", merchant.id)
       .in("status", ["waiting", "ready"])
       .order("order_number", { ascending: true });
     if (error) {
@@ -54,13 +173,12 @@ export default function DashboardPage() {
       return;
     }
     setPagers(data ?? []);
-  }
+  }, [merchant?.id]);
 
   useEffect(() => {
-    fetchPagers();
+    if (!merchant?.id) return;
     setLoading(false);
-
-    // Realtime: when a row changes, refetch
+    fetchPagers();
     const channel = supabase
       .channel("pagers-changes")
       .on(
@@ -69,22 +187,31 @@ export default function DashboardPage() {
         () => fetchPagers()
       )
       .subscribe();
-
     return () => {
       supabase.removeChannel(channel);
     };
-  }, []);
+  }, [merchant?.id, fetchPagers]);
 
   async function handleNewOrder() {
-    // Get next order number
-    const maxOrder = pagers.length
-      ? Math.max(...pagers.map((p) => p.order_number))
-      : 0;
-    const order_number = maxOrder + 1;
+    if (!merchant?.id) return;
+    let order_number: number;
+    if (forceNextOrderOne) {
+      order_number = 1;
+      setForceNextOrderOne(false);
+    } else {
+      const { data: allPagers } = await supabase
+        .from("pagers")
+        .select("order_number")
+        .eq("merchant_id", merchant.id);
+      const maxOrder = allPagers?.length
+        ? Math.max(...allPagers.map((p) => p.order_number))
+        : 0;
+      order_number = maxOrder + 1;
+    }
 
     const { data, error } = await supabase
       .from("pagers")
-      .insert({ order_number, status: "waiting", merchant_id: "default" })
+      .insert({ order_number, status: "waiting", merchant_id: merchant.id })
       .select("id, order_number")
       .single();
 
@@ -112,33 +239,33 @@ export default function DashboardPage() {
     fetchPagers();
   }
 
+  async function handleResetNumbers() {
+    if (!merchant?.id) return;
+    await supabase
+      .from("pagers")
+      .delete()
+      .eq("merchant_id", merchant.id);
+    setForceNextOrderOne(true);
+    setPagers([]);
+    setShowNewOrder(false);
+    setNewPager(null);
+    fetchPagers();
+  }
+
   const waiting = pagers.filter((p) => p.status === "waiting");
   const ready = pagers.filter((p) => p.status === "ready");
 
-  const isPaid = merchant?.plan === "paid";
+  const isPaid = merchant?.plan === "plus" || merchant?.plan === "premium" || merchant?.plan === "paid";
   // Free plan only: bar 0–5, block new order and show message when at or over limit (5+)
   const slotsUsed = Math.min(waiting.length, FREE_PLAN_MAX_SLOTS);
   const cannotAddNewOrder = !isPaid && waiting.length >= FREE_PLAN_MAX_SLOTS;
   const showOverLimitPopup = !isPaid && waiting.length >= FREE_PLAN_MAX_SLOTS;
 
-  // Base URL for QR: manual override (saved in localStorage) > env var > current origin
-  // If user enters only http://192.168.1.28 (no port) for local IP, add :3000 so dev server is reachable
-  const rawBase =
-    typeof window !== "undefined"
-      ? (baseUrlOverride.trim() || process.env.NEXT_PUBLIC_APP_URL || window.location.origin)
-      : "";
-  const hasPort = rawBase && /^https?:\/\/[^/]+:\d+(\/|$)/.test(rawBase.replace(/\?.*$/, ""));
-  const isLocalHost =
-    rawBase && (rawBase.includes("localhost") || /^https?:\/\/(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(rawBase));
+  // Base URL for QR: prefer NEXT_PUBLIC_APP_URL, fall back to current origin
   const baseUrl =
-    rawBase && !hasPort && isLocalHost
-      ? `${rawBase.replace(/\/$/, "")}:3000`
-      : rawBase;
-  // Only show Base URL / port hints when on localhost or private IP (dev); hide when published
-  const isDevOrLocal =
-    typeof window !== "undefined" &&
-    (window.location.origin.includes("localhost") ||
-      /^https?:\/\/(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(window.location.origin));
+    typeof window !== "undefined"
+      ? (process.env.NEXT_PUBLIC_APP_URL || window.location.origin)
+      : "";
   const pagerUrl =
     typeof window !== "undefined" && newPager
       ? `${baseUrl}/pager/${newPager.id}`
@@ -146,6 +273,34 @@ export default function DashboardPage() {
   const qrSrc = pagerUrl
     ? `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(pagerUrl)}`
     : "";
+
+  if (authChecking || !merchant) {
+    const signedInNoMerchant = !authChecking && authUser && !merchant;
+    return (
+      <div className="flex min-h-[100svh] flex-col items-center justify-center gap-4 bg-zinc-950 px-6 text-white">
+        {signedInNoMerchant ? (
+          <>
+            <p className="text-center text-zinc-300">We couldn&apos;t load your dashboard.</p>
+            <button
+              type="button"
+              onClick={() => {
+                setAuthChecking(true);
+                supabase.auth.getSession().then(async ({ data: { session } }) => {
+                  await loadForSession(session);
+                  setAuthChecking(false);
+                });
+              }}
+              className="rounded-full bg-white px-6 py-2.5 text-sm font-semibold text-zinc-900 hover:bg-zinc-100"
+            >
+              Try again
+            </button>
+          </>
+        ) : (
+          <p className="text-zinc-400">Loading…</p>
+        )}
+      </div>
+    );
+  }
 
   const brandBg = merchant?.colour_background ? { backgroundColor: merchant.colour_background } : undefined;
   const waitingHeaderBg = merchant?.colour_waiting ? { backgroundColor: merchant.colour_waiting } : undefined;
@@ -158,6 +313,8 @@ export default function DashboardPage() {
   const NUMBER_BOX_BG = "#262626";
   const DEFAULT_WAITING = "#1e4ed8";
   const DEFAULT_READY = "#5ec26a";
+  /** Green used on homepage (hero, pricing, CTA); limit popup uses this to match. */
+  const HOMEPAGE_GREEN = "#01a76c";
   const keyline = "border-[#525252]";
 
   // For light backgrounds (e.g. white), use dark text so branding stays visible
@@ -173,46 +330,118 @@ export default function DashboardPage() {
   };
   const brandTextClass = isLightBg(brandBarBg) ? "text-zinc-900" : "text-white";
   const brandTaglineClass = isLightBg(brandBarBg) ? "text-zinc-600" : "text-zinc-400";
+  const backLinkClass = isLightBg(brandBarBg) ? "text-zinc-900 hover:text-zinc-950" : "text-zinc-400 hover:text-white";
+
+  const middleBgHex = merchant?.colour_middle_column ?? DEFAULT_BG;
+  const isMiddleLight = isLightBg(middleBgHex);
+  const middleTextClass = isMiddleLight ? "text-zinc-900" : "text-white";
+  const middleMutedClass = isMiddleLight ? "text-zinc-600" : "text-zinc-400";
+  const middleLinkClass = isMiddleLight ? "text-zinc-900 hover:text-zinc-950" : "text-zinc-400 hover:text-white";
+  const middleIconClass = isMiddleLight ? "text-zinc-600 hover:text-zinc-900 hover:bg-zinc-200" : "text-zinc-400 hover:text-white hover:bg-zinc-800";
+
+  const leftColumnHex = merchant?.colour_left_column ?? DEFAULT_BG;
+  const rightColumnHex = merchant?.colour_right_column ?? DEFAULT_BG;
+  const waitingHeaderHex = merchant?.colour_waiting ?? DEFAULT_WAITING;
+  const readyHeaderHex = merchant?.colour_ready ?? DEFAULT_READY;
+  const isLeftLight = isLightBg(leftColumnHex);
+  const isRightLight = isLightBg(rightColumnHex);
+  const isWaitingHeaderLight = isLightBg(waitingHeaderHex);
+  const isReadyHeaderLight = isLightBg(readyHeaderHex);
+  const leftTextClass = isLeftLight ? "text-zinc-900" : "text-white";
+  const leftMutedClass = isLeftLight ? "text-zinc-600" : "text-zinc-400";
+  const rightTextClass = isRightLight ? "text-zinc-900" : "text-white";
+  const rightMutedClass = isRightLight ? "text-zinc-600" : "text-zinc-400";
+  const waitingHeaderTextClass = isWaitingHeaderLight ? "text-zinc-900" : "text-white";
+  const readyHeaderTextClass = isReadyHeaderLight ? "text-zinc-900" : "text-white";
 
   return (
-    <div className="flex h-screen min-h-0 flex-col overflow-hidden text-white" style={{ backgroundColor: DEFAULT_BG }}>
-      {/* Full-width brand bar – Brand colour */}
-      <div className={`flex min-h-[5.25rem] shrink-0 items-center justify-center border-b ${keyline} px-4 py-2 w-full`} style={brandBg || { backgroundColor: DEFAULT_BG }}>
-        {merchant?.logo_url?.trim() ? (
-          <img src={merchant.logo_url.trim()} alt="" className="max-h-[5.25rem] w-full max-w-full object-contain object-center" referrerPolicy="no-referrer" />
-        ) : (
-          <>
-            <span className={`text-[1.4rem] font-semibold ${brandTextClass}`}>{merchant?.business_name?.trim() || "BURGER Shack"}</span>
-            {merchant?.business_tagline?.trim() ? (
-              <span className={`ml-2 text-[1.4rem] ${brandTaglineClass}`}>{merchant.business_tagline.trim()}</span>
-            ) : null}
-          </>
-        )}
+    <div className="flex h-[100svh] min-h-0 flex-col overflow-hidden text-white" style={{ backgroundColor: DEFAULT_BG }}>
+      {/* Brand bar – left: back, centre: logo/name, right: user menu or Login/Sign up (padding matches homepage nav) */}
+      {showChrome && (
+      <div className={`flex h-12 sm:h-[5.25rem] shrink-0 items-center justify-between border-b ${keyline} px-3 py-1.5 sm:px-6 sm:py-4 w-full`} style={brandBg || { backgroundColor: DEFAULT_BG }}>
+        <div className="flex w-32 shrink-0 items-center md:w-52 -mt-[14px] sm:-mt-[20px]">
+          <Link
+            href="/"
+            className={`inline-flex items-center gap-1 text-xs sm:text-sm font-medium ${backLinkClass}`}
+            aria-label="Back to home"
+          >
+            <svg className="h-4 w-4 sm:h-5 sm:w-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+            </svg>
+            Back
+          </Link>
+        </div>
+        <div className="flex min-w-0 flex-1 items-center justify-center">
+          {merchant?.logo_url?.trim() ? (
+            <img
+              src={merchant.logo_url.trim()}
+              alt=""
+              className="max-h-8 w-full max-w-full object-contain object-center sm:max-h-[5.25rem]"
+              referrerPolicy="no-referrer"
+            />
+          ) : (
+            <>
+              <span className={`text-base sm:text-[1.4rem] font-semibold ${brandTextClass}`}>
+                {merchant?.business_name?.trim() || "YOUR BUSINESS"}
+              </span>
+              {merchant?.business_tagline?.trim() ? (
+                <span className={`ml-2 text-xs sm:text-[1.4rem] ${brandTaglineClass}`}>
+                  {merchant.business_tagline.trim()}
+                </span>
+              ) : null}
+            </>
+          )}
+        </div>
+        <div className="flex w-40 shrink-0 items-center justify-end gap-4 md:w-52">
+          {authUser ? (
+            <UserMenu user={authUser} hideDashboard brandBarColor={brandBarBg} className="-mt-[30px]" />
+          ) : (
+            <div className="-mt-[7px] flex items-center gap-4">
+              <Link href="/login" className="text-sm font-medium text-zinc-300 hover:text-white">
+                Login
+              </Link>
+              <Link href="/signup" className="rounded-full bg-[#01a76c] px-5 py-2.5 text-sm font-semibold text-white hover:bg-[#018a5e]">
+                Sign up
+              </Link>
+            </div>
+          )}
+        </div>
       </div>
+      )}
+      {isPhone && !isPhoneLandscape ? (
+        <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-6 p-6 text-center" style={{ backgroundColor: DEFAULT_BG }}>
+          <svg className="h-20 w-20 shrink-0 text-zinc-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M14 4l2 2-2 2M6 20l-2-2 2-2M4 10a6 6 0 0112 0M4 14a6 6 0 0012 0" />
+          </svg>
+          <p className="text-lg font-semibold text-white">Please rotate your device</p>
+          <p className="text-sm text-zinc-400">Use the dashboard in landscape mode</p>
+        </div>
+      ) : (
+      <>
       <main className="flex min-h-0 flex-1 flex-row gap-0">
         {/* Left column – WAITING */}
         <section className={`flex min-h-0 w-1/3 flex-col border-r ${keyline}`}>
-          <div className={`flex h-12 shrink-0 items-center justify-center rounded-none border px-4 py-1.5 text-center text-sm font-semibold uppercase tracking-wide ${keyline}`} style={waitingHeaderBg || { backgroundColor: DEFAULT_WAITING }}>
+          <div className={`flex h-9 sm:h-12 shrink-0 items-center justify-center rounded-none border px-3 py-1 sm:px-4 sm:py-1.5 text-center text-xs sm:text-sm font-semibold uppercase tracking-wide ${keyline} ${waitingHeaderTextClass}`} style={waitingHeaderBg || { backgroundColor: DEFAULT_WAITING }}>
             Waiting
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto p-2" style={leftColumnBg || { backgroundColor: DEFAULT_BG }}>
+          <div className={`min-h-0 flex-1 overflow-y-auto p-2 ${leftTextClass}`} style={leftColumnBg || { backgroundColor: DEFAULT_BG }}>
             {loading ? (
-              <p className="p-4 text-zinc-400">Loading…</p>
+              <p className={`p-4 ${leftMutedClass}`}>Loading…</p>
             ) : waiting.length === 0 ? (
-              <p className="p-4 text-zinc-500">No orders waiting</p>
+              <p className={`p-4 ${leftMutedClass}`}>No orders waiting</p>
             ) : (
-              <ul className="space-y-2">
+              <ul className={isPhone ? "space-y-1" : "space-y-2"}>
                 {waiting.map((p) => (
                   <li
                     key={p.id}
-                    className={`flex items-center justify-between rounded border px-3 py-2 ${keyline}`}
+                    className={`flex items-center justify-between rounded border ${keyline} ${isPhone ? "px-2 py-1" : "px-3 py-2"}`}
                     style={{ backgroundColor: NUMBER_BOX_BG }}
                   >
-                    <span className="text-xl font-bold">#{String(p.order_number).padStart(3, "0")}</span>
+                    <span className={`font-bold text-white ${isPhone ? "text-base" : "text-xl"}`}>#{String(p.order_number).padStart(3, "0")}</span>
                     <button
                       type="button"
                       onClick={() => markReady(p.id)}
-                      className={`rounded-full border px-4 py-1.5 text-sm font-medium opacity-90 hover:opacity-100 ${keyline}`}
+                      className={`rounded-full border font-medium opacity-90 hover:opacity-100 ${keyline} ${waitingHeaderTextClass} ${isPhone ? "px-2 py-0.5 text-xs" : "px-4 py-1.5 text-sm"}`}
                       style={{ backgroundColor: merchant?.colour_waiting || DEFAULT_WAITING }}
                     >
                       Ready?
@@ -224,130 +453,223 @@ export default function DashboardPage() {
           </div>
         </section>
 
-        {/* Middle – Background colour (dashboard only); no side borders so keylines match (left/right columns draw the dividers) */}
-        <section className={`relative flex min-h-0 w-1/3 flex-col ${keyline}`} style={middleColumnBg || { backgroundColor: DEFAULT_BG }}>
-          <div className="flex min-h-0 flex-1 flex-col p-6" style={middleColumnBg || { backgroundColor: DEFAULT_BG }}>
-            <div className="flex min-h-0 flex-1 flex-col items-center justify-center">
-          {showNewOrder && newPager ? (
-            <div className="flex w-full flex-col items-center gap-4">
-              <p className="text-center text-sm text-zinc-300">
-                Scan to avoid the queue
-                <br />
-                <span className="font-medium text-white">NO LOGIN REQUIRED</span>
-              </p>
-              {isDevOrLocal && (
-                <div className="w-full max-w-xs">
-                  <label className="mb-1 block text-left text-xs text-zinc-400">
-                    Base URL for customer link (use your Mac’s IP so phone can open it)
-                  </label>
-                  <p className="mb-1 text-left text-xs text-zinc-500">
-                    Include the port, e.g. <code className="rounded bg-zinc-800 px-1">:3000</code> — otherwise the link won’t work.
-                  </p>
-                  <input
-                    type="url"
-                    value={baseUrlOverride}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      setBaseUrlOverride(v);
-                      if (typeof window !== "undefined") localStorage.setItem(BASE_URL_KEY, v);
-                    }}
-                    placeholder="e.g. http://192.168.1.28:3000"
-                    className={`w-full rounded border bg-zinc-800 px-3 py-2 text-sm text-white placeholder:text-zinc-500 ${keyline}`}
-                  />
-                </div>
-              )}
-              {qrSrc && (
-                <img src={qrSrc} alt="QR code for pager" className={`rounded-lg border bg-white p-2 ${keyline}`} />
-              )}
-              {pagerUrl && (
-                <>
-                  <p className="max-w-full break-all text-center text-xs text-zinc-400">
-                    {pagerUrl}
-                  </p>
-                  {isDevOrLocal && pagerUrl.startsWith("http://localhost") && (
-                    <p className="max-w-sm text-center text-xs text-amber-400">
-                      QR points to localhost — customer’s phone won’t open it. Enter your Mac’s URL above (e.g. http://192.168.1.28:3000).
-                    </p>
-                  )}
-                </>
-              )}
-              <p className="text-2xl font-bold">#{String(newPager.order_number).padStart(3, "0")}</p>
-              <button
-                type="button"
-                onClick={handleDone}
-                className={`rounded-full border bg-rose-600 px-12 py-4 text-lg font-bold uppercase hover:bg-rose-500 ${keyline}`}
+        {/* Middle – When free plan at limit, column fills green with white card (homepage green); otherwise normal background */}
+        <section
+          className={`relative flex min-h-0 w-1/3 flex-col overflow-hidden ${keyline}`}
+          style={
+            showOverLimitPopup
+              ? { backgroundColor: HOMEPAGE_GREEN }
+              : (middleColumnBg || { backgroundColor: DEFAULT_BG })
+          }
+        >
+          {showOverLimitPopup ? (
+            <div className="flex min-h-0 flex-1 flex-col items-center justify-center p-4 sm:p-6">
+              <div
+                className={`w-full max-w-sm rounded-xl bg-white text-center shadow-lg ${
+                  isPhone ? "p-4" : "p-8"
+                }`}
               >
-                Done
-              </button>
+                <h2 className={`font-bold text-zinc-900 ${isPhone ? "text-lg" : "text-xl"}`}>Free Plan Limit Reached</h2>
+                <p className={`mt-2 font-medium text-zinc-900 ${isPhone ? "text-sm" : "text-base"}`}>5 out of 5 slots filled.</p>
+                <p className={`mt-4 text-zinc-700 ${isPhone ? "text-xs" : "text-sm"}`}>
+                  Move an order to &apos;Ready&apos; to free up a slot, or upgrade today to unlock:
+                </p>
+                <ul className={`mt-4 list-none space-y-2 text-center font-semibold text-zinc-900 ${isPhone ? "text-xs" : "text-sm"}`}>
+                  <li>Unlimited Orders</li>
+                  <li>Custom logo & brand colors</li>
+                  <li>Clickable Wait-Screen Ads</li>
+                  <li>Post-Order Redirects</li>
+                </ul>
+                <Link
+                  href="/#pricing"
+                  className={`mt-6 sm:mt-8 flex w-full justify-center rounded-lg font-semibold text-white hover:opacity-95 ${
+                    isPhone ? "py-2.5 text-sm" : "py-3.5 text-base"
+                  }`}
+                  style={{ backgroundColor: HOMEPAGE_GREEN }}
+                >
+                  Go Unlimited
+                </Link>
+              </div>
             </div>
+          ) : (
+          <div className={`flex min-h-0 flex-1 flex-col p-3 sm:p-6 ${middleTextClass}`} style={middleColumnBg || { backgroundColor: DEFAULT_BG }}>
+            {isPhone && (
+              <div className="mb-2 flex w-full shrink-0 justify-center">
+                {merchant?.logo_url?.trim() ? (
+                  <img
+                    src={merchant.logo_url.trim()}
+                    alt=""
+                    className="max-h-10 w-full max-w-[8rem] object-contain object-center"
+                    referrerPolicy="no-referrer"
+                  />
+                ) : (
+                  <span className={`text-center text-sm font-semibold ${middleTextClass}`}>
+                    {merchant?.business_name?.trim() || "YOUR BUSINESS"}
+                  </span>
+                )}
+              </div>
+            )}
+            <div
+              className={`flex min-h-0 flex-1 flex-col items-center ${
+                isPhone ? "justify-center" : "justify-center"
+              }`}
+            >
+          {showNewOrder && newPager ? (
+            isPhone ? (
+              <div className="flex w-full flex-col items-center gap-2">
+                {qrSrc && (
+                  <img
+                    src={qrSrc}
+                    alt="QR code for pager"
+                    className={
+                      isPhoneLandscape
+                        ? `w-[45vw] max-w-[5.6rem] max-h-[42vh] rounded-lg border bg-white p-1.5 ${keyline}`
+                        : `w-[55vw] max-w-[5.75rem] max-h-[36vh] rounded-lg border bg-white p-1.5 ${keyline}`
+                    }
+                    style={{ aspectRatio: "1 / 1" }}
+                  />
+                )}
+                <p className={`text-2xl font-bold ${middleTextClass}`}>
+                  #{String(newPager.order_number).padStart(3, "0")}
+                </p>
+                <button
+                  type="button"
+                  onClick={handleDone}
+                  className={`rounded-full border px-4 py-1.5 text-xs font-bold uppercase hover:opacity-90 ${keyline} ${waitingHeaderTextClass}`}
+                  style={waitingHeaderBg || { backgroundColor: DEFAULT_WAITING }}
+                >
+                  Done
+                </button>
+              </div>
+            ) : (
+              <div className="flex w-full flex-col items-center justify-center gap-6">
+                <p className={`text-center text-base md:text-lg ${middleMutedClass}`}>
+                  Scan to avoid the queue
+                  <br />
+                  <span className={`font-semibold ${middleTextClass}`}>NO LOGIN REQUIRED</span>
+                </p>
+                {qrSrc && (
+                  <img
+                    src={qrSrc}
+                    alt="QR code for pager"
+                    className={`w-48 md:w-56 max-w-[14rem] max-h-[65vh] rounded-lg border bg-white p-3 ${keyline}`}
+                    style={{ aspectRatio: "1 / 1" }}
+                  />
+                )}
+                <p className={`text-4xl md:text-5xl font-bold ${middleTextClass}`}>
+                  #{String(newPager.order_number).padStart(3, "0")}
+                </p>
+                <button
+                  type="button"
+                  onClick={handleDone}
+                  className={`rounded-full border px-8 py-3.5 text-lg font-bold uppercase hover:opacity-90 ${keyline} ${waitingHeaderTextClass}`}
+                  style={waitingHeaderBg || { backgroundColor: DEFAULT_WAITING }}
+                >
+                  Done
+                </button>
+              </div>
+            )
           ) : (
             <button
               type="button"
               onClick={handleNewOrder}
               disabled={cannotAddNewOrder}
-              className={`rounded-full border bg-rose-600 px-12 py-4 text-lg font-bold uppercase hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-60 ${keyline}`}
+              className={`rounded-full border bg-rose-600 font-bold uppercase hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-60 ${keyline} ${isPhone ? "px-2 py-0.5 text-[0.6rem]" : "px-8 py-3.5 text-lg"}`}
             >
               New order
             </button>
-          )}
+            )}
             </div>
-            {/* Free plan only: bar (1–5 green→red) + label; paid has no limit or bar */}
+            {/* Free plan only: bar (1–5 green→red) + label; paid has no limit or bar.
+                On phones we keep it visible but with much tighter spacing. */}
             {!isPaid && (
-              <div className={`mt-auto shrink-0 w-full space-y-1 rounded border px-2 pt-4 ${keyline}`}>
-                <div className="flex w-full gap-0.5 overflow-hidden rounded">
+              <div
+                className={`${
+                  isPhone
+                    ? isPhoneLandscape
+                      ? "-mt-[50px]"
+                      : "-mt-[30px]"
+                    : "mt-0 sm:mt-auto"
+                } shrink-0 w-full space-y-0.5 sm:space-y-1 rounded border px-2 pt-0 sm:pt-3 ${keyline}`}
+              >
+                <div className="flex w-full gap-0.5 overflow-hidden rounded items-stretch">
                   {Array.from({ length: FREE_PLAN_MAX_SLOTS }, (_, i) => (
                     <div
                       key={i}
-                      className={`h-2 flex-1 ${i < slotsUsed ? BAR_SEGMENT_COLORS[i] : "bg-zinc-700"}`}
+                      className={`h-1.5 flex-1 ${i < slotsUsed ? BAR_SEGMENT_COLORS[i] : "bg-zinc-700"}`}
                     />
                   ))}
                 </div>
-                <p className="text-center text-sm text-zinc-400">
+                <p className={`mt-0.5 text-center text-[0.6rem] sm:text-sm ${middleMutedClass}`}>
                   Free plan: {slotsUsed} of {FREE_PLAN_MAX_SLOTS} slots used
                 </p>
               </div>
             )}
-          </div>
-          {/* Over-limit pop-up: 6+ in waiting – fills middle column */}
-          {showOverLimitPopup && (
-            <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/90 p-6">
-              <div className={`w-full max-w-sm rounded-lg border bg-zinc-900 p-6 text-center shadow-xl ${keyline}`}>
-                <h2 className="text-lg font-semibold text-white">Free plan limit reached</h2>
-                <p className="mt-2 text-sm text-zinc-300">
-                  You have {waiting.length} orders in the waiting queue. The free plan allows a maximum of {FREE_PLAN_MAX_SLOTS} at a time.
-                </p>
-                <p className="mt-3 text-sm text-zinc-400">
-                  Move orders to Ready to free slots, or upgrade to the paid plan for more capacity.
-                </p>
-                <p className="mt-4 text-xs text-zinc-500">Plan details TBC</p>
+            {isPhone && (
+              <div className="mt-2 flex w-full items-center justify-between">
+                <Link
+                  href="/"
+                  className={`inline-flex items-center gap-1 text-xs font-medium ${middleLinkClass}`}
+                  aria-label="Back to home"
+                >
+                  <svg className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+                  </svg>
+                  Back
+                </Link>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setSettingsOpen(true)}
+                    className={`flex h-8 w-8 items-center justify-center rounded-lg ${middleIconClass}`}
+                    aria-label="Settings"
+                  >
+                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    </svg>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleResetNumbers}
+                    className={`flex h-12 w-12 items-center justify-center rounded-lg ${forceNextOrderOne ? "text-emerald-400 hover:bg-zinc-800 hover:text-emerald-400" : middleIconClass}`}
+                    aria-label="Reset numbers"
+                    title={forceNextOrderOne ? "Next order will be #001" : "Reset numbers – clear queue and next order will be #001"}
+                  >
+                    <svg className="h-6 w-6" viewBox="0 0 20 25" fill="currentColor" aria-hidden>
+                      <path d="M4.15,11.16c.08-.26.37-.41.63-.32.26.08.41.37.32.63-.42,1.3-.3,2.71.32,3.93,1.3,2.53,4.4,3.53,6.94,2.23s3.53-4.4,2.23-6.94c-1.3-2.53-4.4-3.53-6.94-2.23l-.33.17.24.47c.05.1.07.21.05.31-.05.27-.31.45-.58.41l-1.71-.28c-.16-.03-.29-.12-.37-.26-.07-.14-.07-.31,0-.45l.76-1.56c.05-.09.12-.16.21-.21.25-.13.55-.04.69.2l.24.48.33-.17h0c3.02-1.55,6.73-.36,8.28,2.67,1.55,3.02.36,6.73-2.67,8.28-1.45.75-3.14.89-4.69.38-1.56-.5-2.85-1.59-3.59-3.05-.75-1.45-.89-3.14-.38-4.69Z" />
+                    </svg>
+                  </button>
+                </div>
               </div>
-            </div>
+            )}
+          </div>
           )}
         </section>
 
         {/* Right column – READY */}
         <section className={`flex min-h-0 w-1/3 flex-col border-l ${keyline}`}>
-          <div className={`flex h-12 shrink-0 items-center justify-center rounded-none border px-4 py-1.5 text-center text-sm font-semibold uppercase tracking-wide ${keyline}`} style={readyHeaderBg || { backgroundColor: DEFAULT_READY }}>
+          <div className={`flex h-9 sm:h-12 shrink-0 items-center justify-center rounded-none border px-3 py-1 sm:px-4 sm:py-1.5 text-center text-xs sm:text-sm font-semibold uppercase tracking-wide ${keyline} ${readyHeaderTextClass}`} style={readyHeaderBg || { backgroundColor: DEFAULT_READY }}>
             Ready
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto p-2" style={rightColumnBg || { backgroundColor: DEFAULT_BG }}>
+          <div className={`min-h-0 flex-1 overflow-y-auto p-2 ${rightTextClass}`} style={rightColumnBg || { backgroundColor: DEFAULT_BG }}>
             {loading ? (
-              <p className="p-4 text-zinc-400">Loading…</p>
+              <p className={`p-4 ${rightMutedClass}`}>Loading…</p>
             ) : ready.length === 0 ? (
-              <p className="p-4 text-zinc-500">No orders ready</p>
+              <p className={`p-4 ${rightMutedClass}`}>No orders ready</p>
             ) : (
-              <ul className="space-y-2">
+              <ul className={isPhone ? "space-y-1" : "space-y-2"}>
                 {ready.map((p) => (
                   <li
                     key={p.id}
-                    className={`flex items-center justify-between rounded border px-3 py-2 ${keyline}`}
+                    className={`flex items-center justify-between rounded border ${keyline} ${isPhone ? "px-2 py-1" : "px-3 py-2"}`}
                     style={{ backgroundColor: NUMBER_BOX_BG }}
                   >
-                    <span className="text-xl font-bold">#{String(p.order_number).padStart(3, "0")}</span>
+                    <span className={`font-bold text-white ${isPhone ? "text-base" : "text-xl"}`}>#{String(p.order_number).padStart(3, "0")}</span>
                     <button
                       type="button"
                       onClick={() => markCollected(p.id)}
-                      className={`rounded-full border px-4 py-1.5 text-sm font-medium opacity-90 hover:opacity-100 ${keyline}`}
+                      className={`rounded-full border font-medium opacity-90 hover:opacity-100 ${keyline} ${readyHeaderTextClass} ${isPhone ? "px-2 py-0.5 text-xs" : "px-4 py-1.5 text-sm"}`}
                       style={{ backgroundColor: merchant?.colour_ready || DEFAULT_READY }}
                     >
                       Collected
@@ -361,22 +683,37 @@ export default function DashboardPage() {
       </main>
 
       {/* Bottom bar – same colour as page background */}
-      <footer className={`relative flex h-12 shrink-0 items-center justify-between border-t px-4 ${keyline}`} style={{ backgroundColor: DEFAULT_BG }}>
-        <button
-          type="button"
-          onClick={() => setSettingsOpen(true)}
-          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-white"
-          aria-label="Settings"
-        >
-          <svg className="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-          </svg>
-        </button>
-        <div className="absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 items-center justify-center">
-          <img src="/qready-logo.png" alt="Qready" className="h-7 w-auto max-w-[120px] object-contain object-center" referrerPolicy="no-referrer" />
+      {showChrome && (
+      <footer className={`relative flex h-9 sm:h-12 shrink-0 items-center justify-between border-t px-3 sm:px-4 ${keyline}`} style={{ backgroundColor: DEFAULT_BG }}>
+        <div className="flex shrink-0 items-center gap-1">
+          <button
+            type="button"
+            onClick={() => setSettingsOpen(true)}
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-zinc-400 hover:bg-zinc-800 hover:text-white"
+            aria-label="Settings"
+          >
+            <svg className="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            onClick={handleResetNumbers}
+            className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-lg hover:bg-zinc-800 ${forceNextOrderOne ? "text-emerald-400" : "text-zinc-400 hover:text-white"}`}
+            aria-label="Reset numbers"
+            title={forceNextOrderOne ? "Next order will be #001" : "Reset numbers – clear queue and next order will be #001"}
+          >
+            <svg className="h-8 w-8 shrink-0" viewBox="0 0 20 25" fill="currentColor" aria-hidden>
+              <path d="M4.15,11.16c.08-.26.37-.41.63-.32.26.08.41.37.32.63-.42,1.3-.3,2.71.32,3.93,1.3,2.53,4.4,3.53,6.94,2.23s3.53-4.4,2.23-6.94c-1.3-2.53-4.4-3.53-6.94-2.23l-.33.17.24.47c.05.1.07.21.05.31-.05.27-.31.45-.58.41l-1.71-.28c-.16-.03-.29-.12-.37-.26-.07-.14-.07-.31,0-.45l.76-1.56c.05-.09.12-.16.21-.21.25-.13.55-.04.69.2l.24.48.33-.17h0c3.02-1.55,6.73-.36,8.28,2.67,1.55,3.02.36,6.73-2.67,8.28-1.45.75-3.14.89-4.69.38-1.56-.5-2.85-1.59-3.59-3.05-.75-1.45-.89-3.14-.38-4.69Z" />
+            </svg>
+          </button>
         </div>
-        <span className="shrink-0 text-right text-sm text-zinc-400">
+        <div className="absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 items-center justify-center">
+          <img src="/qready-logo.png" alt="QReady" className="h-7 w-auto max-w-[120px] object-contain object-center" referrerPolicy="no-referrer" />
+        </div>
+        <div className="flex shrink-0 items-center text-sm text-zinc-400">
+          <span>
           {new Date().toLocaleDateString("en-GB", {
             weekday: "long",
             day: "numeric",
@@ -386,8 +723,13 @@ export default function DashboardPage() {
             hour: "2-digit",
             minute: "2-digit",
           })}
-        </span>
+          </span>
+        </div>
       </footer>
+      )}
+
+      </>
+      )}
 
       {/* Settings modal */}
       {settingsOpen && merchant && (
@@ -395,17 +737,9 @@ export default function DashboardPage() {
           merchant={merchant}
           onClose={() => setSettingsOpen(false)}
           onSave={async (updates) => {
-            const updated = await updateMerchant(updates);
+            const updated = await updateMerchant({ ...updates, id: merchant.id, plan: merchant.plan });
             setMerchant((prev) => (prev ? { ...prev, ...updates, ...(updated ?? {}) } : updated ?? null));
             setSettingsOpen(false);
-          }}
-          onPlanChange={async (plan) => {
-            setMerchant((m) => (m ? { ...m, plan } : null));
-            const updated = await updateMerchant({ plan });
-            if (updated) {
-              setMerchant(updated);
-            }
-            // If update failed (e.g. DB missing columns), keep optimistic "paid" so you can still test colours
           }}
         />
       )}
@@ -417,15 +751,14 @@ function SettingsModal({
   merchant,
   onClose,
   onSave,
-  onPlanChange,
 }: {
   merchant: Merchant;
   onClose: () => void;
   onSave: (updates: Partial<Merchant>) => Promise<void>;
-  onPlanChange?: (plan: "free" | "paid") => Promise<void>;
 }) {
-  const isPaid = merchant.plan === "paid";
-  const [businessName, setBusinessName] = useState(merchant.business_name ?? "");
+  const isPaid = merchant.plan === "plus" || merchant.plan === "premium" || merchant.plan === "paid";
+  const isPremium = merchant.plan === "premium" || merchant.plan === "paid";
+  const [businessName, setBusinessName] = useState(merchant.business_name?.trim() || "YOUR BUSINESS");
   const [businessTagline, setBusinessTagline] = useState(merchant.business_tagline ?? "");
   const [logoUrl, setLogoUrl] = useState(merchant.logo_url ?? "");
   const [colourBackground, setColourBackground] = useState(merchant.colour_background ?? "#171717");
@@ -439,8 +772,11 @@ function SettingsModal({
   const [messageThankyou, setMessageThankyou] = useState(merchant.message_thankyou ?? "Thank you for your order");
   const [closeBtnText, setCloseBtnText] = useState(merchant.close_btn_text ?? "Close");
   const [closeBtnUrl, setCloseBtnUrl] = useState(merchant.close_btn_url ?? "");
+  const [promoBannerUrl, setPromoBannerUrl] = useState(merchant.promo_banner_url ?? "");
+  const [promoBannerLink, setPromoBannerLink] = useState(merchant.promo_banner_link ?? "");
   const [saving, setSaving] = useState(false);
   const [logoUploading, setLogoUploading] = useState(false);
+  const [bannerUploading, setBannerUploading] = useState(false);
 
   async function handleSave() {
     setSaving(true);
@@ -458,6 +794,15 @@ function SettingsModal({
       updates.message_thankyou = messageThankyou || null;
       updates.close_btn_text = closeBtnText || null;
       updates.close_btn_url = closeBtnUrl || null;
+    }
+    if (isPremium) {
+      updates.promo_banner_url = promoBannerUrl || null;
+      const raw = (promoBannerLink || "").trim();
+      if (raw && !/^https?:\/\//i.test(raw)) {
+        updates.promo_banner_link = `https://${raw}`;
+      } else {
+        updates.promo_banner_link = raw || null;
+      }
     }
     await onSave(updates);
     setSaving(false);
@@ -490,7 +835,7 @@ function SettingsModal({
               type="text"
               value={businessName}
               onChange={(e) => setBusinessName(e.target.value)}
-              placeholder="e.g. BURGER Shack"
+              placeholder="YOUR BUSINESS"
               className="w-full rounded border border-zinc-600 bg-zinc-800 px-3 py-2 text-white placeholder:text-zinc-500"
             />
             <input
@@ -526,10 +871,16 @@ function SettingsModal({
                         return;
                       }
                       setLogoUploading(true);
-                      const url = await uploadLogo(file);
-                      if (url) setLogoUrl(url);
-                      setLogoUploading(false);
-                      e.target.value = "";
+                      try {
+                        const url = await uploadLogo(file);
+                        if (url) setLogoUrl(url);
+                      } catch (err) {
+                        const msg = err instanceof Error ? err.message : String(err);
+                        alert(`Logo upload failed: ${msg}`);
+                      } finally {
+                        setLogoUploading(false);
+                        e.target.value = "";
+                      }
                     }}
                   />
                 </label>
@@ -550,7 +901,7 @@ function SettingsModal({
               3. Colours
               {!isPaid && <LockIcon />}
             </label>
-            <p className="mt-0.5 text-xs text-zinc-500">1. Brand: top bar, phone 1 &amp; 4. 2. Waiting: left header + boxes, phone 2. 3. Ready: right header + boxes, phone 3. 4–6: left / right / middle column (dashboard).</p>
+            <p className="mt-0.5 text-xs text-zinc-500">1. Brand: top bar on dashboard, background on handset screens 1, 2 &amp; 4. 2. Waiting: Waiting buttons on dashboard. 3. Ready: Ready buttons on dashboard, background on handset screen 3. 4. Left column: background of left column on dashboard. 5. Right column: background of right column on dashboard. 6. Middle column: background of middle column on dashboard.</p>
             <div className="mt-1 grid grid-cols-2 gap-2">
               <div>
                 <span className="text-xs text-zinc-500">1. Brand</span>
@@ -573,7 +924,7 @@ function SettingsModal({
                 <input type="color" value={colourRightColumn} onChange={(e) => setColourRightColumn(e.target.value)} className="mt-0.5 h-9 w-full cursor-pointer rounded border border-zinc-600 bg-transparent" />
               </div>
               <div>
-                <span className="text-xs text-zinc-500">6. Background (middle column)</span>
+                <span className="text-xs text-zinc-500">6. Middle column</span>
                 <input type="color" value={colourMiddleColumn} onChange={(e) => setColourMiddleColumn(e.target.value)} className="mt-0.5 h-9 w-full cursor-pointer rounded border border-zinc-600 bg-transparent" />
               </div>
             </div>
@@ -582,13 +933,14 @@ function SettingsModal({
           {/* 4. Three key messages (paid) */}
           <div className={!isPaid ? lockClass : ""}>
             <label className="flex items-center text-sm font-medium text-zinc-300">
-              4. Key messages on pager screens
+              4. Key messages on phone screens
               {!isPaid && <LockIcon />}
             </label>
+            <p className="mt-0.5 text-xs text-zinc-500">Press Enter for a new line on the handset (e.g. YOUR FOOD / IS SIZZLING).</p>
             <div className="mt-1 space-y-2">
-              <input type="text" value={messageQueue} onChange={(e) => setMessageQueue(e.target.value)} placeholder="Queue message" className="w-full rounded border border-zinc-600 bg-zinc-800 px-3 py-2 text-sm text-white placeholder:text-zinc-500" />
-              <input type="text" value={messageReady} onChange={(e) => setMessageReady(e.target.value)} placeholder="Ready message" className="w-full rounded border border-zinc-600 bg-zinc-800 px-3 py-2 text-sm text-white placeholder:text-zinc-500" />
-              <input type="text" value={messageThankyou} onChange={(e) => setMessageThankyou(e.target.value)} placeholder="Thank you message" className="w-full rounded border border-zinc-600 bg-zinc-800 px-3 py-2 text-sm text-white placeholder:text-zinc-500" />
+              <textarea value={messageQueue} onChange={(e) => setMessageQueue(e.target.value)} placeholder="Queue message (use returns for new lines on handset)" rows={3} className="w-full rounded border border-zinc-600 bg-zinc-800 px-3 py-2 text-sm text-white placeholder:text-zinc-500 resize-y" />
+              <textarea value={messageReady} onChange={(e) => setMessageReady(e.target.value)} placeholder="Ready message (use returns for new lines)" rows={3} className="w-full rounded border border-zinc-600 bg-zinc-800 px-3 py-2 text-sm text-white placeholder:text-zinc-500 resize-y" />
+              <textarea value={messageThankyou} onChange={(e) => setMessageThankyou(e.target.value)} placeholder="Thank you message (use returns for new lines)" rows={3} className="w-full rounded border border-zinc-600 bg-zinc-800 px-3 py-2 text-sm text-white placeholder:text-zinc-500 resize-y" />
             </div>
           </div>
 
@@ -603,25 +955,81 @@ function SettingsModal({
               <input type="url" value={closeBtnUrl} onChange={(e) => setCloseBtnUrl(e.target.value)} placeholder="e.g. https://trustpilot.com/..." className="w-full rounded border border-zinc-600 bg-zinc-800 px-3 py-2 text-sm text-white placeholder:text-zinc-500" />
             </div>
           </div>
+
+          {/* 6. Advertising / promotional banner (Premium only) */}
+          <div className={!isPremium ? lockClass : ""}>
+            <label className="flex items-center text-sm font-medium text-zinc-300">
+              6. Add advertising
+              {!isPremium && <LockIcon />}
+            </label>
+            <p className="mt-0.5 text-xs text-zinc-500">
+              Promotional banner shown to customers on the waiting screen. Size required: 375×170px. Max file size: 2MB. File types supported: JPEG, PNG, WebP, GIF. Premium only.
+            </p>
+            <div className="mt-1 space-y-2">
+              <div className="flex items-center gap-2">
+                <label className="cursor-pointer rounded border border-zinc-600 bg-zinc-800 px-3 py-2 text-sm text-zinc-300 hover:bg-zinc-700 disabled:pointer-events-none disabled:opacity-50">
+                  {bannerUploading ? "Uploading…" : "Upload banner (max 2MB)"}
+                  <input
+                    type="file"
+                    accept="image/jpeg,image/png,image/gif,image/webp"
+                    className="hidden"
+                    disabled={!isPremium || bannerUploading}
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      if (!file || !isPremium) return;
+                      if (file.size > 2 * 1024 * 1024) {
+                        alert("Banner must be 2MB or smaller.");
+                        return;
+                      }
+                      setBannerUploading(true);
+                      try {
+                        const url = await uploadBanner(file);
+                        if (url) setPromoBannerUrl(url);
+                      } catch (err) {
+                        const msg = err instanceof Error ? err.message : String(err);
+                        alert(`Banner upload failed: ${msg}`);
+                      } finally {
+                        setBannerUploading(false);
+                        e.target.value = "";
+                      }
+                    }}
+                  />
+                </label>
+              </div>
+              <input
+                type="url"
+                value={promoBannerUrl}
+                onChange={(e) => setPromoBannerUrl(e.target.value)}
+                placeholder="Or paste image URL for your ad banner"
+                className="w-full rounded border border-zinc-600 bg-zinc-800 px-3 py-2 text-sm text-white placeholder:text-zinc-500"
+                disabled={!isPremium}
+              />
+              <div>
+                <label htmlFor="promo-banner-link" className="block text-xs font-medium text-zinc-400 mt-2">Advertising link (opens in new tab when customer taps banner)</label>
+                <input
+                  id="promo-banner-link"
+                  type="url"
+                  value={promoBannerLink}
+                  onChange={(e) => setPromoBannerLink(e.target.value)}
+                  placeholder="https://www.yoursite.com"
+                  className="mt-0.5 w-full rounded border border-zinc-600 bg-zinc-800 px-3 py-2 text-sm text-white placeholder:text-zinc-500"
+                  disabled={!isPremium}
+                />
+                <p className="mt-0.5 text-[11px] text-zinc-500">Include https:// at the start or the link may not work.</p>
+              </div>
+            </div>
+          </div>
         </div>
         </div>
         <div className="shrink-0 border-t border-zinc-700 p-4 space-y-3">
           <button type="button" onClick={handleSave} disabled={saving} className="w-full rounded-full bg-rose-600 py-3 font-semibold text-white hover:bg-rose-500 disabled:opacity-60">
             {saving ? "Saving…" : "Save"}
           </button>
-          {onPlanChange && (
-            <div className="rounded-lg border border-zinc-600 bg-zinc-800/50 px-3 py-2">
-              <p className="text-xs text-zinc-500 mb-1.5">Testing: switch plan</p>
-              <div className="flex gap-2">
-                <button type="button" onClick={() => onPlanChange("free")} className="flex-1 rounded bg-zinc-700 py-1.5 text-xs text-white hover:bg-zinc-600">
-                  Free
-                </button>
-                <button type="button" onClick={() => onPlanChange("paid")} className="flex-1 rounded bg-emerald-700 py-1.5 text-xs text-white hover:bg-emerald-600">
-                  Paid
-                </button>
-              </div>
-            </div>
-          )}
+          <p className="text-center">
+            <Link href="/#pricing" className="text-sm text-zinc-400 hover:text-white">
+              View plans & upgrade
+            </Link>
+          </p>
         </div>
       </div>
     </div>

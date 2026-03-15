@@ -9,8 +9,11 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@stripe/react-stripe-js": "^2.8.1",
+    "@stripe/stripe-js": "^4.8.0",
     "@supabase/supabase-js": "^2.47.10",
     "next": "16.1.6",
+    "stripe": "^17.4.0",
     "react": "19.2.3",
     "react-dom": "19.2.3"
   },

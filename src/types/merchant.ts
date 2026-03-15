@@ -1,5 +1,5 @@
-/** Merchant/settings row. Plan 'paid' unlocks settings 2–5 and removes free-plan queue limit. */
-export type MerchantPlan = "free" | "paid";
+/** Merchant/settings row. free = starter; plus = branding, no ads; premium = branding + custom ad banner. 'paid' kept for backward compat (treated as premium). */
+export type MerchantPlan = "free" | "plus" | "premium" | "paid";
 
 export type Merchant = {
   id: string;
@@ -18,6 +18,11 @@ export type Merchant = {
   message_thankyou: string | null;
   close_btn_text: string | null;
   close_btn_url: string | null;
+  promo_banner_url: string | null;
+  /** URL opened when customer taps the ad banner on the handset (Premium). Opens in new tab. */
+  promo_banner_link: string | null;
+  stripe_customer_id?: string | null;
+  stripe_subscription_id?: string | null;
   created_at?: string;
   updated_at?: string;
 };
@@ -39,4 +44,6 @@ export const DEFAULT_MERCHANT: Merchant = {
   message_thankyou: null,
   close_btn_text: null,
   close_btn_url: null,
+  promo_banner_url: null,
+  promo_banner_link: null,
 };

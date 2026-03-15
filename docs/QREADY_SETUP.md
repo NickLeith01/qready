@@ -1,6 +1,6 @@
 # Qready.io – Setup & architecture
 
-This doc describes how the Qready site and app are set up: one codebase, one repo, and how it gets from your computer to the live site.
+This doc describes how the QReady site and app are set up: one codebase, one repo, and how it gets from your computer to the live site.
 
 ---
 

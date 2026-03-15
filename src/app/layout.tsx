@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Qready",
+  title: "QReady",
   description: "Hardware-free pager for queues – scan, wait, get buzzed.",
 };
 
@@ -41,7 +41,7 @@ export default function RootLayout({
           <div className="flex min-h-screen flex-col items-center justify-center bg-zinc-950 px-4 text-center text-white">
             <h1 className="text-2xl font-semibold">Temporarily unavailable</h1>
             <p className="mt-2 text-zinc-400">
-              Qready is currently offline for maintenance. Please try again later.
+              QReady is currently offline for maintenance. Please try again later.
             </p>
           </div>
         ) : (
