@@ -581,63 +581,77 @@ export default function DashboardPage() {
             )}
             </div>
             {/* Free plan only: bar (1–5 green→red) + label; paid has no limit or bar.
-                On phones we keep it visible but with much tighter spacing. */}
-            {!isPaid && (
-              <div
-                className={`${
-                  isPhone ? "mt-5" : "mt-0 sm:mt-auto"
-                } shrink-0 w-full space-y-0.5 sm:space-y-1 rounded border px-2 pt-0 sm:pt-3 ${keyline}`}
-              >
-                <div className="flex w-full gap-0.5 overflow-hidden rounded items-stretch">
-                  {Array.from({ length: FREE_PLAN_MAX_SLOTS }, (_, i) => (
-                    <div
-                      key={i}
-                      className={`h-1.5 flex-1 ${i < slotsUsed ? BAR_SEGMENT_COLORS[i] : "bg-zinc-700"}`}
-                    />
-                  ))}
-                </div>
-                <p className={`mt-0.5 text-center text-[0.6rem] sm:text-sm ${middleMutedClass}`}>
-                  Free plan: {slotsUsed} of {FREE_PLAN_MAX_SLOTS} slots used
-                </p>
-              </div>
-            )}
-            {isPhone && (
-              <div className="mt-auto flex w-full items-center justify-between pb-2 sm:pb-3">
-                <Link
-                  href="/"
-                  className={`inline-flex items-center gap-1 text-xs font-medium ${middleLinkClass}`}
-                  aria-label="Back to home"
-                >
-                  <svg className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-                  </svg>
-                  Back
-                </Link>
-                <div className="flex items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={() => setSettingsOpen(true)}
-                    className={`flex h-8 w-8 items-center justify-center rounded-lg ${middleIconClass}`}
-                    aria-label="Settings"
+                On phones we keep it visible but pinned with the controls at the bottom. */}
+            {isPhone ? (
+              <div className="mt-auto w-full space-y-2 pb-safe">
+                {!isPaid && (
+                  <div className="shrink-0 w-full space-y-0.5 sm:space-y-1 rounded border px-2 pt-0 sm:pt-3 ${keyline}">
+                    <div className="flex w-full gap-0.5 overflow-hidden rounded items-stretch">
+                      {Array.from({ length: FREE_PLAN_MAX_SLOTS }, (_, i) => (
+                        <div
+                          key={i}
+                          className={`h-1.5 flex-1 ${i < slotsUsed ? BAR_SEGMENT_COLORS[i] : "bg-zinc-700"}`}
+                        />
+                      ))}
+                    </div>
+                    <p className={`mt-0.5 text-center text-[0.6rem] sm:text-sm ${middleMutedClass}`}>
+                      Free plan: {slotsUsed} of {FREE_PLAN_MAX_SLOTS} slots used
+                    </p>
+                  </div>
+                )}
+                <div className="flex w-full items-center justify-between">
+                  <Link
+                    href="/"
+                    className={`inline-flex items-center gap-1 text-xs font-medium ${middleLinkClass}`}
+                    aria-label="Back to home"
                   >
-                    <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    <svg className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
                     </svg>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleResetNumbers}
-                    className={`flex h-12 w-12 items-center justify-center rounded-lg ${forceNextOrderOne ? "text-emerald-400 hover:bg-zinc-800 hover:text-emerald-400" : middleIconClass}`}
-                    aria-label="Reset numbers"
-                    title={forceNextOrderOne ? "Next order will be #001" : "Reset numbers – clear queue and next order will be #001"}
-                  >
-                    <svg className="h-6 w-6" viewBox="0 0 20 25" fill="currentColor" aria-hidden>
-                      <path d="M4.15,11.16c.08-.26.37-.41.63-.32.26.08.41.37.32.63-.42,1.3-.3,2.71.32,3.93,1.3,2.53,4.4,3.53,6.94,2.23s3.53-4.4,2.23-6.94c-1.3-2.53-4.4-3.53-6.94-2.23l-.33.17.24.47c.05.1.07.21.05.31-.05.27-.31.45-.58.41l-1.71-.28c-.16-.03-.29-.12-.37-.26-.07-.14-.07-.31,0-.45l.76-1.56c.05-.09.12-.16.21-.21.25-.13.55-.04.69.2l.24.48.33-.17h0c3.02-1.55,6.73-.36,8.28,2.67,1.55,3.02.36,6.73-2.67,8.28-1.45.75-3.14.89-4.69.38-1.56-.5-2.85-1.59-3.59-3.05-.75-1.45-.89-3.14-.38-4.69Z" />
-                    </svg>
-                  </button>
+                    Back
+                  </Link>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => setSettingsOpen(true)}
+                      className={`flex h-8 w-8 items-center justify-center rounded-lg ${middleIconClass}`}
+                      aria-label="Settings"
+                    >
+                      <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleResetNumbers}
+                      className={`flex h-12 w-12 items-center justify-center rounded-lg ${forceNextOrderOne ? "text-emerald-400 hover:bg-zinc-800 hover:text-emerald-400" : middleIconClass}`}
+                      aria-label="Reset numbers"
+                      title={forceNextOrderOne ? "Next order will be #001" : "Reset numbers – clear queue and next order will be #001"}
+                    >
+                      <svg className="h-6 w-6" viewBox="0 0 20 25" fill="currentColor" aria-hidden>
+                        <path d="M4.15,11.16c.08-.26.37-.41.63-.32.26.08.41.37.32.63-.42,1.3-.3,2.71.32,3.93,1.3,2.53,4.4,3.53,6.94,2.23s3.53-4.4,2.23-6.94c-1.3-2.53-4.4-3.53-6.94-2.23l-.33.17.24.47c.05.1.07.21.05.31-.05.27-.31.45-.58.41l-1.71-.28c-.16-.03-.29-.12-.37-.26-.07-.14-.07-.31,0-.45l.76-1.56c.05-.09.12-.16.21-.21.25-.13.55-.04.69.2l.24.48.33-.17h0c3.02-1.55,6.73-.36,8.28,2.67,1.55,3.02.36,6.73-2.67,8.28-1.45.75-3.14.89-4.69.38-1.56-.5-2.85-1.59-3.59-3.05-.75-1.45-.89-3.14-.38-4.69Z" />
+                      </svg>
+                    </button>
+                  </div>
                 </div>
               </div>
+            ) : (
+              !isPaid && (
+                <div className="mt-0 sm:mt-auto shrink-0 w-full space-y-0.5 sm:space-y-1 rounded border px-2 pt-0 sm:pt-3 ${keyline}">
+                  <div className="flex w-full gap-0.5 overflow-hidden rounded items-stretch">
+                    {Array.from({ length: FREE_PLAN_MAX_SLOTS }, (_, i) => (
+                      <div
+                        key={i}
+                        className={`h-1.5 flex-1 ${i < slotsUsed ? BAR_SEGMENT_COLORS[i] : "bg-zinc-700"}`}
+                      />
+                    ))}
+                  </div>
+                  <p className={`mt-0.5 text-center text-[0.6rem] sm:text-sm ${middleMutedClass}`}>
+                    Free plan: {slotsUsed} of {FREE_PLAN_MAX_SLOTS} slots used
+                  </p>
+                </div>
+              )
             )}
           </div>
           )}
