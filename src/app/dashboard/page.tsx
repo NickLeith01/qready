@@ -581,24 +581,9 @@ export default function DashboardPage() {
             )}
             </div>
             {/* Free plan only: bar (1–5 green→red) + label; paid has no limit or bar.
-                On phones we keep it visible but pinned with the controls at the bottom. */}
+                On phones we hide the bar to save space and rely on the over-limit pop-up instead. */}
             {isPhone ? (
               <div className="mt-auto w-full space-y-2 pb-safe">
-                {!isPaid && (
-                  <div className="shrink-0 w-full space-y-0.5 sm:space-y-1 rounded border px-2 pt-0 sm:pt-3 ${keyline}">
-                    <div className="flex w-full gap-0.5 overflow-hidden rounded items-stretch">
-                      {Array.from({ length: FREE_PLAN_MAX_SLOTS }, (_, i) => (
-                        <div
-                          key={i}
-                          className={`h-1.5 flex-1 ${i < slotsUsed ? BAR_SEGMENT_COLORS[i] : "bg-zinc-700"}`}
-                        />
-                      ))}
-                    </div>
-                    <p className={`mt-0.5 text-center text-[0.6rem] sm:text-sm ${middleMutedClass}`}>
-                      Free plan: {slotsUsed} of {FREE_PLAN_MAX_SLOTS} slots used
-                    </p>
-                  </div>
-                )}
                 <div className="flex w-full items-center justify-between">
                   <Link
                     href="/"
@@ -638,7 +623,7 @@ export default function DashboardPage() {
               </div>
             ) : (
               !isPaid && (
-                <div className="mt-0 sm:mt-auto shrink-0 w-full space-y-0.5 sm:space-y-1 rounded border px-2 pt-0 sm:pt-3 ${keyline}">
+                <div className={`mt-0 sm:mt-auto shrink-0 w-full space-y-0.5 sm:space-y-1 rounded border px-2 pt-0 sm:pt-3 ${keyline}`}>
                   <div className="flex w-full gap-0.5 overflow-hidden rounded items-stretch">
                     {Array.from({ length: FREE_PLAN_MAX_SLOTS }, (_, i) => (
                       <div
