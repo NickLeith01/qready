@@ -516,7 +516,7 @@ export default function DashboardPage() {
             >
           {showNewOrder && newPager ? (
             isPhone ? (
-              <div className="flex w-full flex-col items-center gap-2">
+              <div className="flex w-full flex-col items-center gap-2 mt-3">
                 {qrSrc && (
                   <img
                     src={qrSrc}
@@ -585,7 +585,7 @@ export default function DashboardPage() {
             {!isPaid && (
               <div
                 className={`${
-                  isPhone ? "mt-3" : "mt-0 sm:mt-auto"
+                  isPhone ? "mt-5" : "mt-0 sm:mt-auto"
                 } shrink-0 w-full space-y-0.5 sm:space-y-1 rounded border px-2 pt-0 sm:pt-3 ${keyline}`}
               >
                 <div className="flex w-full gap-0.5 overflow-hidden rounded items-stretch">
@@ -602,7 +602,7 @@ export default function DashboardPage() {
               </div>
             )}
             {isPhone && (
-              <div className="mt-2 flex w-full items-center justify-between">
+              <div className="mt-auto flex w-full items-center justify-between pb-2 sm:pb-3">
                 <Link
                   href="/"
                   className={`inline-flex items-center gap-1 text-xs font-medium ${middleLinkClass}`}
