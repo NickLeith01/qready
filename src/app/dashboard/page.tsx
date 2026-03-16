@@ -585,11 +585,7 @@ export default function DashboardPage() {
             {!isPaid && (
               <div
                 className={`${
-                  isPhone
-                    ? isPhoneLandscape
-                      ? "-mt-[50px]"
-                      : "-mt-[30px]"
-                    : "mt-0 sm:mt-auto"
+                  isPhone ? "mt-3" : "mt-0 sm:mt-auto"
                 } shrink-0 w-full space-y-0.5 sm:space-y-1 rounded border px-2 pt-0 sm:pt-3 ${keyline}`}
               >
                 <div className="flex w-full gap-0.5 overflow-hidden rounded items-stretch">
