@@ -509,17 +509,6 @@ export default function AccountPage() {
                 )}
               </div>
 
-              <div className="col-span-3 mt-3 flex justify-end">
-                <button
-                  type="button"
-                  className="text-sm text-zinc-500 underline hover:text-zinc-700 disabled:opacity-50"
-                  onClick={syncPlanFromStripe}
-                  disabled={syncingPlan}
-                >
-                  {syncingPlan ? "Syncing…" : "Sync plan from Stripe"}
-                </button>
-              </div>
-
               <h3 className="col-span-3 mt-8 text-base font-semibold text-zinc-900">Billing information</h3>
               {!isPaid ? (
                 <p className="col-span-3 mt-2 text-sm text-zinc-500">–</p>
