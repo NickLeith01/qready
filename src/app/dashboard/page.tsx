@@ -9,7 +9,6 @@ import type { User } from "@supabase/supabase-js";
 import { getMerchantByUserId, createMerchantForUser, getOrCreateAnonymousMerchant, updateMerchant } from "@/lib/merchant";
 import { uploadLogo, uploadBanner } from "@/lib/uploadLogo";
 import type { Merchant } from "@/types/merchant";
-import { DEFAULT_MERCHANT } from "@/types/merchant";
 
 type Pager = {
   id: string;
@@ -30,8 +29,6 @@ const BAR_SEGMENT_COLORS = [
   "bg-orange-500",    // 4 – more orange
   "bg-rose-500",      // 5 – red
 ] as const;
-const MERCHANT_CACHE_PREFIX = "qready_merchant_cache:";
-const PAGERS_CACHE_PREFIX = "qready_pagers_cache:";
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -49,122 +46,58 @@ export default function DashboardPage() {
   const [isPhoneLandscape, setIsPhoneLandscape] = useState(false);
   const sessionUserIdRef = useRef<string | undefined>(undefined);
 
-  function getCachedMerchant(userId: string): Merchant | null {
-    if (typeof window === "undefined") return null;
-    try {
-      const raw = localStorage.getItem(`${MERCHANT_CACHE_PREFIX}${userId}`);
-      if (!raw) return null;
-      return JSON.parse(raw) as Merchant;
-    } catch {
-      return null;
-    }
-  }
-
-  function setCachedMerchant(userId: string, merchant: Merchant) {
-    if (typeof window === "undefined") return;
-    try {
-      localStorage.setItem(`${MERCHANT_CACHE_PREFIX}${userId}`, JSON.stringify(merchant));
-    } catch {
-      // ignore storage quota/private mode errors
-    }
-  }
-
-  function getCachedPagers(userId: string): Pager[] | null {
-    if (typeof window === "undefined") return null;
-    try {
-      const raw = localStorage.getItem(`${PAGERS_CACHE_PREFIX}${userId}`);
-      if (!raw) return null;
-      return JSON.parse(raw) as Pager[];
-    } catch {
-      return null;
-    }
-  }
-
-  function setCachedPagers(userId: string, nextPagers: Pager[]) {
-    if (typeof window === "undefined") return;
-    try {
-      localStorage.setItem(`${PAGERS_CACHE_PREFIX}${userId}`, JSON.stringify(nextPagers));
-    } catch {
-      // ignore storage quota/private mode errors
-    }
-  }
-
   // Load merchant (and clear user-specific state) for the current session. Each user gets their own merchant and queue.
   // When the same session refires (e.g. tab focus), don't clear merchant so we avoid a black "Loading" screen.
   const loadForSession = useCallback(async (session: { user: User } | null) => {
-    try {
-      const sessionKey = session?.user?.id ?? "anon";
-      const isSameSession = sessionUserIdRef.current === sessionKey;
+    const sessionKey = session?.user?.id ?? "anon";
+    const isSameSession = sessionUserIdRef.current === sessionKey;
 
-      if (isSameSession) {
-        setLoading(true);
-        let m: Merchant | null = null;
-        if (session?.user) {
-          setAuthUser(session.user);
-          const cached = getCachedMerchant(session.user.id);
-          if (cached) setMerchant(cached);
-          m = await getMerchantByUserId(session.user.id);
-          if (!m) m = await createMerchantForUser(session.user.id);
-          if (m) setCachedMerchant(session.user.id, m);
-          setMerchant(m ?? cached ?? null);
-        } else {
-          setAuthUser(null);
-          m = await getOrCreateAnonymousMerchant();
-          setMerchant(m ?? { ...DEFAULT_MERCHANT, id: "default" });
-        }
-        if (m?.id) {
-          const { data } = await supabase
-            .from("pagers")
-            .select("*")
-            .eq("merchant_id", m.id)
-            .in("status", ["waiting", "ready"])
-            .order("order_number", { ascending: true });
-          const nextPagers = data ?? [];
-          setPagers(nextPagers);
-          if (session?.user && m) setCachedPagers(session.user.id, nextPagers);
-        }
-        setLoading(false);
-        return;
-      }
-
-      sessionUserIdRef.current = sessionKey;
+    if (isSameSession) {
       setLoading(true);
-      setShowNewOrder(false);
-      setNewPager(null);
-      setForceNextOrderOne(false);
+      let m: Merchant | null = null;
       if (session?.user) {
         setAuthUser(session.user);
-        const cached = getCachedMerchant(session.user.id);
-        const cachedPagers = getCachedPagers(session.user.id);
-        if (cached) setMerchant(cached);
-        if (cachedPagers) setPagers(cachedPagers);
-        let m = await getMerchantByUserId(session.user.id);
-        if (!m) {
-          m = await createMerchantForUser(session.user.id);
-        }
-        if (m) setCachedMerchant(session.user.id, m);
-        setMerchant(m ?? cached ?? null);
+        m = await getMerchantByUserId(session.user.id);
+        if (!m) m = await createMerchantForUser(session.user.id);
+        setMerchant(m ?? null);
       } else {
         setAuthUser(null);
-        setPagers([]);
-        setMerchant((prev) => (prev?.id === "default" ? prev : { ...DEFAULT_MERCHANT, id: "default" }));
-        const m = await getOrCreateAnonymousMerchant();
-        setMerchant(m ?? { ...DEFAULT_MERCHANT, id: "default" });
+        m = await getOrCreateAnonymousMerchant();
+        setMerchant(m);
+      }
+      if (m?.id) {
+        const { data } = await supabase
+          .from("pagers")
+          .select("*")
+          .eq("merchant_id", m.id)
+          .in("status", ["waiting", "ready"])
+          .order("order_number", { ascending: true });
+        setPagers(data ?? []);
       }
       setLoading(false);
-    } catch (err) {
-      console.error("Failed to load dashboard session:", err);
-      setLoading(false);
-      if (session?.user) {
-        setAuthUser(session.user);
-        const cached = getCachedMerchant(session.user.id);
-        setMerchant(cached ?? null);
-      } else {
-        setAuthUser(null);
-        setPagers([]);
-        setMerchant({ ...DEFAULT_MERCHANT, id: "default" });
-      }
+      return;
     }
+
+    sessionUserIdRef.current = sessionKey;
+    setLoading(true);
+    setPagers([]);
+    setShowNewOrder(false);
+    setNewPager(null);
+    setForceNextOrderOne(false);
+    setMerchant(null);
+    if (session?.user) {
+      setAuthUser(session.user);
+      let m = await getMerchantByUserId(session.user.id);
+      if (!m) {
+        m = await createMerchantForUser(session.user.id);
+      }
+      setMerchant(m ?? null);
+    } else {
+      setAuthUser(null);
+      const m = await getOrCreateAnonymousMerchant();
+      setMerchant(m);
+    }
+    setLoading(false);
   }, []);
 
   // Decide whether to show top/bottom chrome based on viewport size so that phones (portrait or landscape)
@@ -192,23 +125,10 @@ export default function DashboardPage() {
   useEffect(() => {
     let mounted = true;
     (async () => {
-      try {
-        let { data: { session } } = await supabase.auth.getSession();
-        // On some refreshes browsers briefly report no session before storage settles.
-        // Retry for ~1.2s before deciding anonymous to avoid flashing the free dashboard.
-        if (!session && typeof window !== "undefined") {
-          for (let i = 0; i < 6; i += 1) {
-            await new Promise((resolve) => window.setTimeout(resolve, 200));
-            const retry = await supabase.auth.getSession();
-            session = retry.data.session;
-            if (session) break;
-          }
-        }
-        if (!mounted) return;
-        await loadForSession(session);
-      } finally {
-        if (mounted) setAuthChecking(false);
-      }
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!mounted) return;
+      await loadForSession(session);
+      if (mounted) setAuthChecking(false);
     })();
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
       if (!mounted) return;
@@ -239,16 +159,6 @@ export default function DashboardPage() {
     };
   }, [loadForSession]);
 
-  // Safety net: never allow infinite auth loading on dashboard refresh.
-  useEffect(() => {
-    if (!authChecking) return;
-    const timeout = window.setTimeout(() => {
-      console.warn("Dashboard auth check timed out; showing retry state.");
-      setAuthChecking(false);
-    }, 8000);
-    return () => window.clearTimeout(timeout);
-  }, [authChecking]);
-
   // Fetch pagers for current merchant only
   const fetchPagers = useCallback(async () => {
     if (!merchant?.id) return;
@@ -262,10 +172,8 @@ export default function DashboardPage() {
       console.error("Error fetching pagers:", error);
       return;
     }
-    const nextPagers = data ?? [];
-    setPagers(nextPagers);
-    if (authUser?.id) setCachedPagers(authUser.id, nextPagers);
-  }, [merchant?.id, authUser?.id]);
+    setPagers(data ?? []);
+  }, [merchant?.id]);
 
   useEffect(() => {
     if (!merchant?.id) return;
@@ -367,25 +275,19 @@ export default function DashboardPage() {
     : "";
 
   if (authChecking || !merchant) {
-    const noMerchantAfterAuth = !authChecking && !merchant;
-    const signedInNoMerchant = noMerchantAfterAuth && authUser;
+    const signedInNoMerchant = !authChecking && authUser && !merchant;
     return (
       <div className="flex min-h-[100svh] flex-col items-center justify-center gap-4 bg-zinc-950 px-6 text-white">
-        {noMerchantAfterAuth ? (
+        {signedInNoMerchant ? (
           <>
-            <p className="text-center text-zinc-300">
-              {signedInNoMerchant ? "We couldn&apos;t load your dashboard." : "We couldn&apos;t load the free dashboard."}
-            </p>
+            <p className="text-center text-zinc-300">We couldn&apos;t load your dashboard.</p>
             <button
               type="button"
               onClick={() => {
                 setAuthChecking(true);
                 supabase.auth.getSession().then(async ({ data: { session } }) => {
-                  try {
-                    await loadForSession(session);
-                  } finally {
-                    setAuthChecking(false);
-                  }
+                  await loadForSession(session);
+                  setAuthChecking(false);
                 });
               }}
               className="rounded-full bg-white px-6 py-2.5 text-sm font-semibold text-zinc-900 hover:bg-zinc-100"
