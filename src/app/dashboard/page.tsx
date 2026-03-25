@@ -275,47 +275,29 @@ export default function DashboardPage() {
     : "";
 
   if (authChecking || !merchant) {
-    if (authChecking && !merchant) {
-      return (
-        <div className="flex h-[100svh] min-h-0 flex-col overflow-hidden text-white" style={{ backgroundColor: "#171717" }}>
-          <div className="flex h-12 shrink-0 items-center justify-center border-b border-[#525252] px-3">
-            <span className="text-sm font-semibold tracking-wide text-zinc-300">QReady.io</span>
-          </div>
-          <div className="grid flex-1 min-h-0 grid-cols-3">
-            <section className="min-h-0 border-r border-[#525252] bg-[#171717]">
-              <div className="h-8 border-b border-[#525252] bg-[#1e4ed8]" />
-            </section>
-            <section className="min-h-0 border-r border-[#525252] bg-[#171717]">
-              <div className="flex h-full items-center justify-center">
-                <div className="h-10 w-32 rounded-full bg-zinc-800/70" />
-              </div>
-            </section>
-            <section className="min-h-0 bg-[#171717]">
-              <div className="h-8 border-b border-[#525252] bg-[#5ec26a]" />
-            </section>
-          </div>
-        </div>
-      );
-    }
     const signedInNoMerchant = !authChecking && authUser && !merchant;
     return (
       <div className="flex min-h-[100svh] flex-col items-center justify-center gap-4 bg-zinc-950 px-6 text-white">
-        <p className="text-center text-zinc-300">
-          {signedInNoMerchant ? "We couldn&apos;t load your dashboard." : "We couldn&apos;t load the free dashboard."}
-        </p>
-        <button
-          type="button"
-          onClick={() => {
-            setAuthChecking(true);
-            supabase.auth.getSession().then(async ({ data: { session } }) => {
-              await loadForSession(session);
-              setAuthChecking(false);
-            });
-          }}
-          className="rounded-full bg-white px-6 py-2.5 text-sm font-semibold text-zinc-900 hover:bg-zinc-100"
-        >
-          Try again
-        </button>
+        {signedInNoMerchant ? (
+          <>
+            <p className="text-center text-zinc-300">We couldn&apos;t load your dashboard.</p>
+            <button
+              type="button"
+              onClick={() => {
+                setAuthChecking(true);
+                supabase.auth.getSession().then(async ({ data: { session } }) => {
+                  await loadForSession(session);
+                  setAuthChecking(false);
+                });
+              }}
+              className="rounded-full bg-white px-6 py-2.5 text-sm font-semibold text-zinc-900 hover:bg-zinc-100"
+            >
+              Try again
+            </button>
+          </>
+        ) : (
+          <p className="text-zinc-400">Loading…</p>
+        )}
       </div>
     );
   }
