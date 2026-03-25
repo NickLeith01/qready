@@ -9,6 +9,7 @@ import type { User } from "@supabase/supabase-js";
 import { getMerchantByUserId, createMerchantForUser, getOrCreateAnonymousMerchant, updateMerchant } from "@/lib/merchant";
 import { uploadLogo, uploadBanner } from "@/lib/uploadLogo";
 import type { Merchant } from "@/types/merchant";
+import { DEFAULT_MERCHANT } from "@/types/merchant";
 
 type Pager = {
   id: string;
@@ -60,11 +61,11 @@ export default function DashboardPage() {
           setAuthUser(session.user);
           m = await getMerchantByUserId(session.user.id);
           if (!m) m = await createMerchantForUser(session.user.id);
-          setMerchant(m ?? null);
+          setMerchant(m ?? { ...DEFAULT_MERCHANT, id: session.user.id });
         } else {
           setAuthUser(null);
           m = await getOrCreateAnonymousMerchant();
-          setMerchant(m);
+          setMerchant(m ?? { ...DEFAULT_MERCHANT, id: "default" });
         }
         if (m?.id) {
           const { data } = await supabase
@@ -92,17 +93,23 @@ export default function DashboardPage() {
         if (!m) {
           m = await createMerchantForUser(session.user.id);
         }
-        setMerchant(m ?? null);
+        setMerchant(m ?? { ...DEFAULT_MERCHANT, id: session.user.id });
       } else {
         setAuthUser(null);
         const m = await getOrCreateAnonymousMerchant();
-        setMerchant(m);
+        setMerchant(m ?? { ...DEFAULT_MERCHANT, id: "default" });
       }
       setLoading(false);
     } catch (err) {
       console.error("Failed to load dashboard session:", err);
       setLoading(false);
-      setMerchant(null);
+      if (session?.user) {
+        setAuthUser(session.user);
+        setMerchant({ ...DEFAULT_MERCHANT, id: session.user.id });
+      } else {
+        setAuthUser(null);
+        setMerchant({ ...DEFAULT_MERCHANT, id: "default" });
+      }
     }
   }, []);
 
