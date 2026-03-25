@@ -49,55 +49,61 @@ export default function DashboardPage() {
   // Load merchant (and clear user-specific state) for the current session. Each user gets their own merchant and queue.
   // When the same session refires (e.g. tab focus), don't clear merchant so we avoid a black "Loading" screen.
   const loadForSession = useCallback(async (session: { user: User } | null) => {
-    const sessionKey = session?.user?.id ?? "anon";
-    const isSameSession = sessionUserIdRef.current === sessionKey;
+    try {
+      const sessionKey = session?.user?.id ?? "anon";
+      const isSameSession = sessionUserIdRef.current === sessionKey;
 
-    if (isSameSession) {
+      if (isSameSession) {
+        setLoading(true);
+        let m: Merchant | null = null;
+        if (session?.user) {
+          setAuthUser(session.user);
+          m = await getMerchantByUserId(session.user.id);
+          if (!m) m = await createMerchantForUser(session.user.id);
+          setMerchant(m ?? null);
+        } else {
+          setAuthUser(null);
+          m = await getOrCreateAnonymousMerchant();
+          setMerchant(m);
+        }
+        if (m?.id) {
+          const { data } = await supabase
+            .from("pagers")
+            .select("*")
+            .eq("merchant_id", m.id)
+            .in("status", ["waiting", "ready"])
+            .order("order_number", { ascending: true });
+          setPagers(data ?? []);
+        }
+        setLoading(false);
+        return;
+      }
+
+      sessionUserIdRef.current = sessionKey;
       setLoading(true);
-      let m: Merchant | null = null;
+      setPagers([]);
+      setShowNewOrder(false);
+      setNewPager(null);
+      setForceNextOrderOne(false);
+      setMerchant(null);
       if (session?.user) {
         setAuthUser(session.user);
-        m = await getMerchantByUserId(session.user.id);
-        if (!m) m = await createMerchantForUser(session.user.id);
+        let m = await getMerchantByUserId(session.user.id);
+        if (!m) {
+          m = await createMerchantForUser(session.user.id);
+        }
         setMerchant(m ?? null);
       } else {
         setAuthUser(null);
-        m = await getOrCreateAnonymousMerchant();
+        const m = await getOrCreateAnonymousMerchant();
         setMerchant(m);
       }
-      if (m?.id) {
-        const { data } = await supabase
-          .from("pagers")
-          .select("*")
-          .eq("merchant_id", m.id)
-          .in("status", ["waiting", "ready"])
-          .order("order_number", { ascending: true });
-        setPagers(data ?? []);
-      }
       setLoading(false);
-      return;
+    } catch (err) {
+      console.error("Failed to load dashboard session:", err);
+      setLoading(false);
+      setMerchant(null);
     }
-
-    sessionUserIdRef.current = sessionKey;
-    setLoading(true);
-    setPagers([]);
-    setShowNewOrder(false);
-    setNewPager(null);
-    setForceNextOrderOne(false);
-    setMerchant(null);
-    if (session?.user) {
-      setAuthUser(session.user);
-      let m = await getMerchantByUserId(session.user.id);
-      if (!m) {
-        m = await createMerchantForUser(session.user.id);
-      }
-      setMerchant(m ?? null);
-    } else {
-      setAuthUser(null);
-      const m = await getOrCreateAnonymousMerchant();
-      setMerchant(m);
-    }
-    setLoading(false);
   }, []);
 
   // Decide whether to show top/bottom chrome based on viewport size so that phones (portrait or landscape)
@@ -125,10 +131,13 @@ export default function DashboardPage() {
   useEffect(() => {
     let mounted = true;
     (async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!mounted) return;
-      await loadForSession(session);
-      if (mounted) setAuthChecking(false);
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!mounted) return;
+        await loadForSession(session);
+      } finally {
+        if (mounted) setAuthChecking(false);
+      }
     })();
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
       if (!mounted) return;
@@ -275,19 +284,25 @@ export default function DashboardPage() {
     : "";
 
   if (authChecking || !merchant) {
-    const signedInNoMerchant = !authChecking && authUser && !merchant;
+    const noMerchantAfterAuth = !authChecking && !merchant;
+    const signedInNoMerchant = noMerchantAfterAuth && authUser;
     return (
       <div className="flex min-h-[100svh] flex-col items-center justify-center gap-4 bg-zinc-950 px-6 text-white">
-        {signedInNoMerchant ? (
+        {noMerchantAfterAuth ? (
           <>
-            <p className="text-center text-zinc-300">We couldn&apos;t load your dashboard.</p>
+            <p className="text-center text-zinc-300">
+              {signedInNoMerchant ? "We couldn&apos;t load your dashboard." : "We couldn&apos;t load the free dashboard."}
+            </p>
             <button
               type="button"
               onClick={() => {
                 setAuthChecking(true);
                 supabase.auth.getSession().then(async ({ data: { session } }) => {
-                  await loadForSession(session);
-                  setAuthChecking(false);
+                  try {
+                    await loadForSession(session);
+                  } finally {
+                    setAuthChecking(false);
+                  }
                 });
               }}
               className="rounded-full bg-white px-6 py-2.5 text-sm font-semibold text-zinc-900 hover:bg-zinc-100"
