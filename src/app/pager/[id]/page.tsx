@@ -1,7 +1,7 @@
 "use client";
 
 import { useParams } from "next/navigation";
-import { useEffect, useLayoutEffect, useState, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useState, useRef } from "react";
 import { supabase } from "@/lib/supabase";
 import { getMerchant } from "@/lib/merchant";
 import type { Merchant } from "@/types/merchant";
@@ -152,6 +152,13 @@ export default function PagerPage() {
     typeof window !== "undefined" && id ? sessionStorage.getItem(`pager-seen-ready-${id}`) === "1" : false
   );
   const [thankYouCloseUrl, setThankYouCloseUrl] = useState<string | null>(null);
+  /** Tenant row for this pager — used to subscribe to branding updates (logo, colours, banner). */
+  const [merchantTenantId, setMerchantTenantId] = useState<string | null>(null);
+
+  const merchantFetchSeq = useRef(0);
+  const startedRef = useRef(false);
+  startedRef.current = started;
+  const refetchPagerRef = useRef<() => Promise<void>>(async () => {});
 
   // Lock viewport: no page scroll so footer logo is always visible
   useEffect(() => {
@@ -200,15 +207,17 @@ export default function PagerPage() {
     }
   }
 
-  // Fetch latest pager from server (used on load and when page becomes visible again after lock/tab switch)
-  async function refetchPager() {
+  // Fetch latest pager + merchant (used on load, visibility, bfcache restore). Sequence guard avoids stale overwrites from overlapping requests.
+  const refetchPager = useCallback(async () => {
     if (!id) return;
+    const seq = ++merchantFetchSeq.current;
     setFetchError(null);
     const { data, error } = await supabase
       .from("pagers")
       .select("order_number, status, merchant_id")
       .eq("id", id)
       .single();
+    if (seq !== merchantFetchSeq.current) return;
     if (error) {
       const msg = (error as { message?: string }).message ?? String(error);
       const code = (error as { code?: string }).code;
@@ -225,9 +234,18 @@ export default function PagerPage() {
       setStatus(data.status as PagerStatus);
     }
     const mid = data.merchant_id ?? "default";
-    getMerchant(mid).then(setMerchant);
+    setMerchantTenantId(mid);
+    const m = await getMerchant(mid);
+    if (seq !== merchantFetchSeq.current) return;
+    setMerchant(m);
     // If we just discovered we're ready (e.g. after waking phone), play sound after short delay so browser allows it
-    if (data.status === "ready" && started && !hasPlayedRef.current && typeof document !== "undefined" && document.visibilityState === "visible") {
+    if (
+      data.status === "ready" &&
+      startedRef.current &&
+      !hasPlayedRef.current &&
+      typeof document !== "undefined" &&
+      document.visibilityState === "visible"
+    ) {
       setTimeout(() => {
         if (hasPlayedRef.current) return;
         hasPlayedRef.current = true;
@@ -235,12 +253,14 @@ export default function PagerPage() {
         playReadyAlert();
       }, 250);
     }
-  }
+  }, [id]);
 
-  // Initial fetch and realtime subscription
+  refetchPagerRef.current = refetchPager;
+
+  // Initial fetch and realtime subscription (pager row → status)
   useEffect(() => {
     if (!id) return;
-    refetchPager();
+    void refetchPager();
 
     const channel = supabase
       .channel(`pager-${id}`)
@@ -263,18 +283,51 @@ export default function PagerPage() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [id]);
+  }, [id, refetchPager]);
+
+  // Merchant row → logo, colours, banner (pager row does not change when staff edits settings)
+  useEffect(() => {
+    if (!merchantTenantId) return;
+    const channel = supabase
+      .channel(`merchant-brand-${merchantTenantId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "merchants",
+          filter: `id=eq.${merchantTenantId}`,
+        },
+        () => {
+          void getMerchant(merchantTenantId).then(setMerchant);
+        }
+      )
+      .subscribe();
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [merchantTenantId]);
 
   // When page becomes visible again (wake phone, switch back to tab), refetch so screen updates to green if staff clicked Ready while phone was locked
   useEffect(() => {
     if (typeof document === "undefined" || !id) return;
     const onVisibility = () => {
       if (document.visibilityState === "visible") {
-        refetchPager();
+        void refetchPagerRef.current();
       }
     };
     document.addEventListener("visibilitychange", onVisibility);
     return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, [id]);
+
+  // bfcache restore (e.g. iOS Safari back/forward): refetch fresh branding and status
+  useEffect(() => {
+    if (typeof window === "undefined" || !id) return;
+    const onPageShow = (e: PageTransitionEvent) => {
+      if (e.persisted) void refetchPagerRef.current();
+    };
+    window.addEventListener("pageshow", onPageShow);
+    return () => window.removeEventListener("pageshow", onPageShow);
   }, [id]);
 
   // Keep ref in sync for realtime/refetch callbacks (they read the ref in closures).
