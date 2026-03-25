@@ -30,6 +30,7 @@ const BAR_SEGMENT_COLORS = [
   "bg-orange-500",    // 4 – more orange
   "bg-rose-500",      // 5 – red
 ] as const;
+const MERCHANT_CACHE_PREFIX = "qready_merchant_cache:";
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -46,6 +47,26 @@ export default function DashboardPage() {
   const [isPhone, setIsPhone] = useState(false);
   const [isPhoneLandscape, setIsPhoneLandscape] = useState(false);
   const sessionUserIdRef = useRef<string | undefined>(undefined);
+
+  function getCachedMerchant(userId: string): Merchant | null {
+    if (typeof window === "undefined") return null;
+    try {
+      const raw = localStorage.getItem(`${MERCHANT_CACHE_PREFIX}${userId}`);
+      if (!raw) return null;
+      return JSON.parse(raw) as Merchant;
+    } catch {
+      return null;
+    }
+  }
+
+  function setCachedMerchant(userId: string, merchant: Merchant) {
+    if (typeof window === "undefined") return;
+    try {
+      localStorage.setItem(`${MERCHANT_CACHE_PREFIX}${userId}`, JSON.stringify(merchant));
+    } catch {
+      // ignore storage quota/private mode errors
+    }
+  }
 
   function withTimeout<T>(promise: Promise<T>, ms = 6000): Promise<T | null> {
     return Promise.race([
@@ -66,9 +87,12 @@ export default function DashboardPage() {
         let m: Merchant | null = null;
         if (session?.user) {
           setAuthUser(session.user);
+          const cached = getCachedMerchant(session.user.id);
+          if (cached) setMerchant(cached);
           m = await getMerchantByUserId(session.user.id);
           if (!m) m = await createMerchantForUser(session.user.id);
-          setMerchant(m ?? { ...DEFAULT_MERCHANT, id: session.user.id });
+          if (m) setCachedMerchant(session.user.id, m);
+          setMerchant(m ?? cached ?? null);
         } else {
           setAuthUser(null);
           m = await getOrCreateAnonymousMerchant();
@@ -95,13 +119,14 @@ export default function DashboardPage() {
       setForceNextOrderOne(false);
       if (session?.user) {
         setAuthUser(session.user);
-        // Fail-open immediately on refresh so UI doesn't dead-end while network/auth settles.
-        setMerchant((prev) => (prev?.id === session.user.id ? prev : { ...DEFAULT_MERCHANT, id: session.user.id }));
+        const cached = getCachedMerchant(session.user.id);
+        if (cached) setMerchant(cached);
         let m = await withTimeout(getMerchantByUserId(session.user.id));
         if (!m) {
           m = await withTimeout(createMerchantForUser(session.user.id));
         }
-        setMerchant(m ?? { ...DEFAULT_MERCHANT, id: session.user.id });
+        if (m) setCachedMerchant(session.user.id, m);
+        setMerchant(m ?? cached ?? null);
       } else {
         setAuthUser(null);
         setMerchant((prev) => (prev?.id === "default" ? prev : { ...DEFAULT_MERCHANT, id: "default" }));
@@ -114,7 +139,8 @@ export default function DashboardPage() {
       setLoading(false);
       if (session?.user) {
         setAuthUser(session.user);
-        setMerchant({ ...DEFAULT_MERCHANT, id: session.user.id });
+        const cached = getCachedMerchant(session.user.id);
+        setMerchant(cached ?? null);
       } else {
         setAuthUser(null);
         setMerchant({ ...DEFAULT_MERCHANT, id: "default" });
@@ -149,12 +175,15 @@ export default function DashboardPage() {
     (async () => {
       try {
         let { data: { session } } = await supabase.auth.getSession();
-        // On some refreshes browsers can briefly report no session before storage settles.
-        // Retry once so we don't incorrectly fall back to anonymous mode.
-        if (!session) {
-          await new Promise((resolve) => setTimeout(resolve, 150));
-          const retry = await supabase.auth.getSession();
-          session = retry.data.session;
+        // On some refreshes browsers briefly report no session before storage settles.
+        // Retry for ~1.2s before deciding anonymous to avoid flashing the free dashboard.
+        if (!session && typeof window !== "undefined") {
+          for (let i = 0; i < 6; i += 1) {
+            await new Promise((resolve) => window.setTimeout(resolve, 200));
+            const retry = await supabase.auth.getSession();
+            session = retry.data.session;
+            if (session) break;
+          }
         }
         if (!mounted) return;
         await loadForSession(session);
