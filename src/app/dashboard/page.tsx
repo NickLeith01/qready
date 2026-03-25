@@ -19,6 +19,12 @@ type Pager = {
   merchant_id: string | null;
 };
 
+type DashboardSnapshot = {
+  merchant: Merchant;
+  pagers: Pager[];
+  userId: string | null;
+};
+
 const BASE_URL_KEY = "digital-pager-base-url";
 
 /** Free plan: max 5 in waiting. Bar shows 1–5 (green→red). At 5 can't add; at 6+ show over-limit pop-up. */
@@ -31,15 +37,26 @@ const BAR_SEGMENT_COLORS = [
   "bg-rose-500",      // 5 – red
 ] as const;
 const MERCHANT_CACHE_PREFIX = "qready_merchant_cache:";
+const DASHBOARD_SNAPSHOT_KEY = "qready_dashboard_snapshot";
 
 export default function DashboardPage() {
   const router = useRouter();
-  const [pagers, setPagers] = useState<Pager[]>([]);
+  const [initialSnapshot] = useState<DashboardSnapshot | null>(() => {
+    if (typeof window === "undefined") return null;
+    try {
+      const raw = sessionStorage.getItem(DASHBOARD_SNAPSHOT_KEY);
+      if (!raw) return null;
+      return JSON.parse(raw) as DashboardSnapshot;
+    } catch {
+      return null;
+    }
+  });
+  const [pagers, setPagers] = useState<Pager[]>(() => initialSnapshot?.pagers ?? []);
   const [loading, setLoading] = useState(true);
-  const [authChecking, setAuthChecking] = useState(true);
+  const [authChecking, setAuthChecking] = useState(() => !initialSnapshot);
   const [showNewOrder, setShowNewOrder] = useState(false);
   const [newPager, setNewPager] = useState<{ id: string; order_number: number } | null>(null);
-  const [merchant, setMerchant] = useState<Merchant | null>(null);
+  const [merchant, setMerchant] = useState<Merchant | null>(() => initialSnapshot?.merchant ?? null);
   const [authUser, setAuthUser] = useState<User | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [forceNextOrderOne, setForceNextOrderOne] = useState(false);
@@ -65,6 +82,20 @@ export default function DashboardPage() {
       localStorage.setItem(`${MERCHANT_CACHE_PREFIX}${userId}`, JSON.stringify(merchant));
     } catch {
       // ignore storage quota/private mode errors
+    }
+  }
+
+  function writeDashboardSnapshot(nextMerchant: Merchant, nextPagers: Pager[], nextUserId: string | null) {
+    if (typeof window === "undefined") return;
+    try {
+      const snapshot: DashboardSnapshot = {
+        merchant: nextMerchant,
+        pagers: nextPagers,
+        userId: nextUserId,
+      };
+      sessionStorage.setItem(DASHBOARD_SNAPSHOT_KEY, JSON.stringify(snapshot));
+    } catch {
+      // ignore
     }
   }
 
@@ -105,7 +136,9 @@ export default function DashboardPage() {
             .eq("merchant_id", m.id)
             .in("status", ["waiting", "ready"])
             .order("order_number", { ascending: true });
-          setPagers(data ?? []);
+          const nextPagers = data ?? [];
+          setPagers(nextPagers);
+          if (session?.user && m) writeDashboardSnapshot(m, nextPagers, session.user.id);
         }
         setLoading(false);
         return;
@@ -127,11 +160,13 @@ export default function DashboardPage() {
         }
         if (m) setCachedMerchant(session.user.id, m);
         setMerchant(m ?? cached ?? null);
+        if (m) writeDashboardSnapshot(m, pagers, session.user.id);
       } else {
         setAuthUser(null);
         setMerchant((prev) => (prev?.id === "default" ? prev : { ...DEFAULT_MERCHANT, id: "default" }));
         const m = await withTimeout(getOrCreateAnonymousMerchant());
         setMerchant(m ?? { ...DEFAULT_MERCHANT, id: "default" });
+        if (typeof window !== "undefined") sessionStorage.removeItem(DASHBOARD_SNAPSHOT_KEY);
       }
       setLoading(false);
     } catch (err) {
@@ -144,6 +179,7 @@ export default function DashboardPage() {
       } else {
         setAuthUser(null);
         setMerchant({ ...DEFAULT_MERCHANT, id: "default" });
+        if (typeof window !== "undefined") sessionStorage.removeItem(DASHBOARD_SNAPSHOT_KEY);
       }
     }
   }, []);
@@ -229,6 +265,11 @@ export default function DashboardPage() {
     }, 8000);
     return () => window.clearTimeout(timeout);
   }, [authChecking]);
+
+  useEffect(() => {
+    if (!merchant || !authUser?.id) return;
+    writeDashboardSnapshot(merchant, pagers, authUser.id);
+  }, [merchant, pagers, authUser?.id]);
 
   // Fetch pagers for current merchant only
   const fetchPagers = useCallback(async () => {
@@ -345,7 +386,7 @@ export default function DashboardPage() {
     ? `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(pagerUrl)}`
     : "";
 
-  if (authChecking || !merchant) {
+  if (!merchant || (authChecking && !initialSnapshot?.merchant)) {
     const noMerchantAfterAuth = !authChecking && !merchant;
     const signedInNoMerchant = noMerchantAfterAuth && authUser;
     return (
