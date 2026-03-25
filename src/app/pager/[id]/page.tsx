@@ -93,28 +93,17 @@ function PagerFooter({
     )
   ) : (
     <a
-      href="https://example.com"
+      href="https://www.qready.io"
       target="_blank"
       rel="noopener noreferrer"
       className="relative block h-[170px] w-full overflow-hidden"
     >
-      <div className="absolute inset-0 bg-gradient-to-r from-amber-400 to-sky-400" />
-      <div className="relative flex h-full w-full items-center justify-between px-4">
-        <div className="flex flex-col">
-          <span className="text-xs font-semibold uppercase tracking-wide text-zinc-900">
-            New to Delivery?
-          </span>
-          <span className="mt-1 text-3xl font-extrabold leading-none text-zinc-900">
-            50% OFF
-          </span>
-          <span className="mt-1 text-[11px] font-semibold uppercase tracking-wide text-zinc-900">
-            your first order
-          </span>
-        </div>
-        <div className="ml-3 flex h-16 w-20 items-center justify-center rounded-md bg-white/90 text-[10px] font-semibold uppercase tracking-wide text-black">
-          Tap to claim
-        </div>
-      </div>
+      <img
+        src="/signedout-ad.gif"
+        alt=""
+        className="h-full w-full object-contain object-center"
+        referrerPolicy="no-referrer"
+      />
     </a>
   );
 

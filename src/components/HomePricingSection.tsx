@@ -50,7 +50,7 @@ export default function HomePricingSection() {
     <>
       <section id="pricing" className="w-full bg-[#01a76c] px-6 py-14 md:py-20">
         <h2 className="text-center text-3xl font-bold text-white md:text-4xl">Pricing</h2>
-        <div className="mx-auto mt-16 grid w-full min-w-0 max-w-[min(72rem,100%)] gap-6 md:grid-cols-3 md:gap-8">
+        <div className="mx-auto mt-16 grid w-full min-w-0 max-w-[min(72rem,100%)] gap-6 md:grid-cols-3 md:gap-8 pricing-landscape-grid">
           {/* Starter */}
           <div className="relative min-w-0">
             {isStarter && (

@@ -45,3 +45,10 @@ body {
   }
 }
 
+/* Pricing grid: 3 columns when in landscape on small devices */
+@media (orientation: landscape) and (min-width: 480px) and (max-width: 1023px) {
+  .pricing-landscape-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
