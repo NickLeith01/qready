@@ -75,6 +75,44 @@ export async function getMerchant(id: string = MERCHANT_ID): Promise<Merchant> {
   return toMerchant(data as Record<string, unknown>, id);
 }
 
+/**
+ * Branding for `/pager/[id]` — customers scan QR as anon (not the venue owner).
+ * Omits Stripe columns. Pair with RLS policy: allow SELECT when a pager row references this merchant.
+ */
+export async function getMerchantForCustomerHandset(id: string): Promise<Merchant> {
+  const { data, error } = await supabase
+    .from("merchants")
+    .select(MERCHANT_COLUMNS_FULL_NO_STRIPE)
+    .eq("id", id)
+    .maybeSingle();
+  if (error) {
+    if (isPromoBannerColumnMissing(error)) {
+      const { data: fallback } = await supabase
+        .from("merchants")
+        .select(MERCHANT_COLUMNS_BASE)
+        .eq("id", id)
+        .maybeSingle();
+      return toMerchant(fallback as Record<string, unknown> | null, id);
+    }
+    if (isPromoBannerLinkColumnMissing(error)) {
+      const { data: fallback } = await supabase
+        .from("merchants")
+        .select(MERCHANT_COLUMNS_WITH_BANNER)
+        .eq("id", id)
+        .maybeSingle();
+      return toMerchant(fallback ? { ...fallback, promo_banner_link: null } as Record<string, unknown> : null, id);
+    }
+    const msg = error.message || String(error.code ?? "unknown");
+    if (msg.includes("does not exist") || (error as { code?: string }).code === "42P01") {
+      console.warn("Merchants table not found. Run supabase/migrations/20250306000000_merchants.sql in Supabase SQL Editor to enable settings.");
+    } else {
+      console.error("Error fetching merchant (handset):", msg);
+    }
+    return { ...DEFAULT_MERCHANT, id };
+  }
+  return toMerchant(data as Record<string, unknown>, id);
+}
+
 /** For dashboard (single-tenant). */
 export async function getDefaultMerchant(): Promise<Merchant> {
   return getMerchant(MERCHANT_ID);

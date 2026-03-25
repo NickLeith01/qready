@@ -3,7 +3,7 @@
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useLayoutEffect, useState, useRef } from "react";
 import { supabase } from "@/lib/supabase";
-import { getMerchant } from "@/lib/merchant";
+import { getMerchantForCustomerHandset } from "@/lib/merchant";
 import type { Merchant } from "@/types/merchant";
 
 type PagerStatus = "waiting" | "ready" | "completed";
@@ -235,7 +235,7 @@ export default function PagerPage() {
     }
     const mid = data.merchant_id ?? "default";
     setMerchantTenantId(mid);
-    const m = await getMerchant(mid);
+    const m = await getMerchantForCustomerHandset(mid);
     if (seq !== merchantFetchSeq.current) return;
     setMerchant(m);
     // If we just discovered we're ready (e.g. after waking phone), play sound after short delay so browser allows it
@@ -299,7 +299,7 @@ export default function PagerPage() {
           filter: `id=eq.${merchantTenantId}`,
         },
         () => {
-          void getMerchant(merchantTenantId).then(setMerchant);
+          void getMerchantForCustomerHandset(merchantTenantId).then(setMerchant);
         }
       )
       .subscribe();
@@ -351,7 +351,7 @@ export default function PagerPage() {
     const showingThankYou = thankYou || (status === "completed" && (hasSeenReady || hasBeenReadyRef.current));
     if (!showingThankYou || !merchant?.id) return;
     if (merchant.close_btn_url?.trim()) return;
-    getMerchant(merchant.id).then((m) => {
+    getMerchantForCustomerHandset(merchant.id).then((m) => {
       const url = m.close_btn_url?.trim() || null;
       if (url) setThankYouCloseUrl(url);
     });
