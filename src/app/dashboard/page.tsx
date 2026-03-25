@@ -132,7 +132,14 @@ export default function DashboardPage() {
     let mounted = true;
     (async () => {
       try {
-        const { data: { session } } = await supabase.auth.getSession();
+        let { data: { session } } = await supabase.auth.getSession();
+        // On some refreshes browsers can briefly report no session before storage settles.
+        // Retry once so we don't incorrectly fall back to anonymous mode.
+        if (!session) {
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          const retry = await supabase.auth.getSession();
+          session = retry.data.session;
+        }
         if (!mounted) return;
         await loadForSession(session);
       } finally {
@@ -167,6 +174,16 @@ export default function DashboardPage() {
       subscription.unsubscribe();
     };
   }, [loadForSession]);
+
+  // Safety net: never allow infinite auth loading on dashboard refresh.
+  useEffect(() => {
+    if (!authChecking) return;
+    const timeout = window.setTimeout(() => {
+      console.warn("Dashboard auth check timed out; showing retry state.");
+      setAuthChecking(false);
+    }, 8000);
+    return () => window.clearTimeout(timeout);
+  }, [authChecking]);
 
   // Fetch pagers for current merchant only
   const fetchPagers = useCallback(async () => {
