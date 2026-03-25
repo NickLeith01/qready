@@ -47,6 +47,13 @@ export default function DashboardPage() {
   const [isPhoneLandscape, setIsPhoneLandscape] = useState(false);
   const sessionUserIdRef = useRef<string | undefined>(undefined);
 
+  function withTimeout<T>(promise: Promise<T>, ms = 6000): Promise<T | null> {
+    return Promise.race([
+      promise,
+      new Promise<null>((resolve) => window.setTimeout(() => resolve(null), ms)),
+    ]);
+  }
+
   // Load merchant (and clear user-specific state) for the current session. Each user gets their own merchant and queue.
   // When the same session refires (e.g. tab focus), don't clear merchant so we avoid a black "Loading" screen.
   const loadForSession = useCallback(async (session: { user: User } | null) => {
@@ -86,17 +93,19 @@ export default function DashboardPage() {
       setShowNewOrder(false);
       setNewPager(null);
       setForceNextOrderOne(false);
-      setMerchant(null);
       if (session?.user) {
         setAuthUser(session.user);
-        let m = await getMerchantByUserId(session.user.id);
+        // Fail-open immediately on refresh so UI doesn't dead-end while network/auth settles.
+        setMerchant((prev) => (prev?.id === session.user.id ? prev : { ...DEFAULT_MERCHANT, id: session.user.id }));
+        let m = await withTimeout(getMerchantByUserId(session.user.id));
         if (!m) {
-          m = await createMerchantForUser(session.user.id);
+          m = await withTimeout(createMerchantForUser(session.user.id));
         }
         setMerchant(m ?? { ...DEFAULT_MERCHANT, id: session.user.id });
       } else {
         setAuthUser(null);
-        const m = await getOrCreateAnonymousMerchant();
+        setMerchant((prev) => (prev?.id === "default" ? prev : { ...DEFAULT_MERCHANT, id: "default" }));
+        const m = await withTimeout(getOrCreateAnonymousMerchant());
         setMerchant(m ?? { ...DEFAULT_MERCHANT, id: "default" });
       }
       setLoading(false);
