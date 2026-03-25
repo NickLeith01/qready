@@ -34,7 +34,7 @@ export default function DashboardPage() {
   const router = useRouter();
   const [pagers, setPagers] = useState<Pager[]>([]);
   const [loading, setLoading] = useState(true);
-  const [authChecking, setAuthChecking] = useState(true);
+  const [, setAuthChecking] = useState(true);
   const [showNewOrder, setShowNewOrder] = useState(false);
   const [newPager, setNewPager] = useState<{ id: string; order_number: number } | null>(null);
   const [merchant, setMerchant] = useState<Merchant | null>(null);
@@ -121,7 +121,6 @@ export default function DashboardPage() {
   }, []);
 
   // Auth: on mount and whenever auth changes, load merchant/queue for the current user so the dashboard is never showing another user's data.
-  // Only set authChecking false after loadForSession completes so we never show the app with merchant still null.
   useEffect(() => {
     let mounted = true;
     (async () => {
@@ -273,34 +272,6 @@ export default function DashboardPage() {
   const qrSrc = pagerUrl
     ? `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(pagerUrl)}`
     : "";
-
-  if (authChecking || !merchant) {
-    const signedInNoMerchant = !authChecking && authUser && !merchant;
-    return (
-      <div className="flex min-h-[100svh] flex-col items-center justify-center gap-4 bg-zinc-950 px-6 text-white">
-        {signedInNoMerchant ? (
-          <>
-            <p className="text-center text-zinc-300">We couldn&apos;t load your dashboard.</p>
-            <button
-              type="button"
-              onClick={() => {
-                setAuthChecking(true);
-                supabase.auth.getSession().then(async ({ data: { session } }) => {
-                  await loadForSession(session);
-                  setAuthChecking(false);
-                });
-              }}
-              className="rounded-full bg-white px-6 py-2.5 text-sm font-semibold text-zinc-900 hover:bg-zinc-100"
-            >
-              Try again
-            </button>
-          </>
-        ) : (
-          <p className="text-zinc-400">Loading…</p>
-        )}
-      </div>
-    );
-  }
 
   const brandBg = merchant?.colour_background ? { backgroundColor: merchant.colour_background } : undefined;
   const waitingHeaderBg = merchant?.colour_waiting ? { backgroundColor: merchant.colour_waiting } : undefined;
