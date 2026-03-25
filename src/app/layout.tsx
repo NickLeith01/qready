@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import BfCacheRecovery from "@/components/BfCacheRecovery";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -45,7 +46,10 @@ export default function RootLayout({
             </p>
           </div>
         ) : (
-          children
+          <>
+            <BfCacheRecovery />
+            {children}
+          </>
         )}
       </body>
     </html>

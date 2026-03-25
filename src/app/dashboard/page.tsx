@@ -2,13 +2,13 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import UserMenu from "@/components/UserMenu";
-import type { User } from "@supabase/supabase-js";
+import type { Session, User } from "@supabase/supabase-js";
 import { getMerchantByUserId, createMerchantForUser, getOrCreateAnonymousMerchant, updateMerchant } from "@/lib/merchant";
 import { uploadLogo, uploadBanner } from "@/lib/uploadLogo";
-import type { Merchant } from "@/types/merchant";
+import { DEFAULT_MERCHANT, type Merchant } from "@/types/merchant";
+import { withTimeout } from "@/lib/with-timeout";
 
 type Pager = {
   id: string;
@@ -30,11 +30,115 @@ const BAR_SEGMENT_COLORS = [
   "bg-rose-500",      // 5 – red
 ] as const;
 
+const DASHBOARD_LOAD_TIMEOUT_MS = 25_000;
+/** Refresh must not hang forever if getSession() never resolves (storage lock, client bug). */
+const GET_SESSION_TIMEOUT_MS = 12_000;
+
+/** User id from `session.user` only — can be null when Supabase still uses a proxy after refresh. */
+function userIdFromUserObject(session: { user?: User } | null | undefined): string | null {
+  if (!session?.user) return null;
+  try {
+    const u = session.user as User & { __isUserNotAvailableProxy?: boolean };
+    if (u.__isUserNotAvailableProxy) return null;
+    const id = session.user.id;
+    return typeof id === "string" && id.length > 0 ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+function decodeJwtPayload(accessToken: string): Record<string, unknown> | null {
+  try {
+    const parts = accessToken.split(".");
+    if (parts.length < 2) return null;
+    const b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const json = atob(b64);
+    return JSON.parse(json) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function jwtSub(accessToken: string): string | null {
+  const p = decodeJwtPayload(accessToken);
+  const sub = p?.sub;
+  return typeof sub === "string" && sub.length > 0 ? sub : null;
+}
+
+/**
+ * One stable id for “who is logged in” on the dashboard: real `session.user.id`, else JWT `sub`.
+ * Fixes refresh when the user object is missing/proxy but the access token is already in storage
+ * (getUser() can also fail on some networks — JWT still carries `sub`).
+ */
+function authIdentityKey(session: Session | null | undefined): string {
+  const fromUser = userIdFromUserObject(session);
+  if (fromUser) return fromUser;
+  const t = session?.access_token;
+  if (!t) return "anon";
+  return jwtSub(t) ?? "anon";
+}
+
+/** Merchant row id for signed-in users (= auth uid). Null → anonymous dashboard. */
+function merchantOwnerId(session: Session | null | undefined): string | null {
+  const k = authIdentityKey(session);
+  return k === "anon" ? null : k;
+}
+
+/** Minimal `User` from access token for header/menu when `session.user` is not usable yet. */
+function userFromAccessToken(accessToken: string): User | null {
+  const p = decodeJwtPayload(accessToken);
+  const sub = p?.sub;
+  if (typeof sub !== "string" || !sub) return null;
+  return {
+    id: sub,
+    aud: typeof p.aud === "string" ? p.aud : "authenticated",
+    role: typeof p.role === "string" ? p.role : "authenticated",
+    email: typeof p.email === "string" ? p.email : undefined,
+    phone: "",
+    app_metadata: (p.app_metadata as User["app_metadata"]) ?? {},
+    user_metadata: (p.user_metadata as User["user_metadata"]) ?? {},
+    created_at: typeof p.created_at === "string" ? p.created_at : "",
+    updated_at: typeof p.updated_at === "string" ? p.updated_at : "",
+  } as User;
+}
+
+function sessionUserForUi(session: Session | null): User | null {
+  if (!session) return null;
+  if (session.user) {
+    try {
+      const u = session.user as User & { __isUserNotAvailableProxy?: boolean };
+      if (!u.__isUserNotAvailableProxy) {
+        void session.user.id;
+        return session.user;
+      }
+    } catch {
+      /* use JWT */
+    }
+  }
+  if (session.access_token) return userFromAccessToken(session.access_token);
+  return null;
+}
+
+/**
+ * Prefer a real user from Supabase; otherwise keep JWT-derived user so merchant id + header stay in sync.
+ */
+async function enrichSessionWithUser(session: Session | null): Promise<Session | null> {
+  if (!session) return session;
+  if (userIdFromUserObject(session)) return session;
+  if (!session.access_token) return session;
+  try {
+    const { data: { user }, error } = await supabase.auth.getUser(session.access_token);
+    if (user && !error) return { ...session, user };
+  } catch {
+    /* network / blocked */
+  }
+  const u = userFromAccessToken(session.access_token);
+  return u ? { ...session, user: u } : session;
+}
+
 export default function DashboardPage() {
-  const router = useRouter();
   const [pagers, setPagers] = useState<Pager[]>([]);
   const [loading, setLoading] = useState(true);
-  const [authChecking, setAuthChecking] = useState(true);
   const [showNewOrder, setShowNewOrder] = useState(false);
   const [newPager, setNewPager] = useState<{ id: string; order_number: number } | null>(null);
   const [merchant, setMerchant] = useState<Merchant | null>(null);
@@ -45,60 +149,112 @@ export default function DashboardPage() {
   const [isPhone, setIsPhone] = useState(false);
   const [isPhoneLandscape, setIsPhoneLandscape] = useState(false);
   const sessionUserIdRef = useRef<string | undefined>(undefined);
+  /** Ignore auth events until bootstrap has set sessionUserIdRef (prevents duplicate load + races with SIGNED_IN). */
+  const authListenerReadyRef = useRef(false);
 
   // Load merchant (and clear user-specific state) for the current session. Each user gets their own merchant and queue.
   // When the same session refires (e.g. tab focus), don't clear merchant so we avoid a black "Loading" screen.
-  const loadForSession = useCallback(async (session: { user: User } | null) => {
-    const sessionKey = session?.user?.id ?? "anon";
+  const loadForSession = useCallback(async (session: Session | null) => {
+    const sessionKey = authIdentityKey(session);
     const isSameSession = sessionUserIdRef.current === sessionKey;
+    const ownerId = merchantOwnerId(session);
 
-    if (isSameSession) {
+    try {
+      if (isSameSession) {
+        setLoading(true);
+        let m: Merchant | null = null;
+        if (ownerId) {
+          const u = sessionUserForUi(session);
+          if (u) setAuthUser(u);
+          m = await getMerchantByUserId(ownerId);
+          if (!m) m = await createMerchantForUser(ownerId);
+          setMerchant(m ?? null);
+        } else {
+          setAuthUser(null);
+          m = await getOrCreateAnonymousMerchant();
+          setMerchant(m);
+        }
+        if (m?.id) {
+          const { data } = await supabase
+            .from("pagers")
+            .select("*")
+            .eq("merchant_id", m.id)
+            .in("status", ["waiting", "ready"])
+            .order("order_number", { ascending: true });
+          setPagers(data ?? []);
+        }
+        return;
+      }
+
+      sessionUserIdRef.current = sessionKey;
       setLoading(true);
-      let m: Merchant | null = null;
-      if (session?.user) {
-        setAuthUser(session.user);
-        m = await getMerchantByUserId(session.user.id);
-        if (!m) m = await createMerchantForUser(session.user.id);
+      setPagers([]);
+      setShowNewOrder(false);
+      setNewPager(null);
+      setForceNextOrderOne(false);
+      setMerchant(null);
+      if (ownerId) {
+        const u = sessionUserForUi(session);
+        if (u) setAuthUser(u);
+        let m = await getMerchantByUserId(ownerId);
+        if (!m) {
+          m = await createMerchantForUser(ownerId);
+        }
         setMerchant(m ?? null);
       } else {
         setAuthUser(null);
-        m = await getOrCreateAnonymousMerchant();
+        const m = await getOrCreateAnonymousMerchant();
         setMerchant(m);
       }
-      if (m?.id) {
-        const { data } = await supabase
-          .from("pagers")
-          .select("*")
-          .eq("merchant_id", m.id)
-          .in("status", ["waiting", "ready"])
-          .order("order_number", { ascending: true });
-        setPagers(data ?? []);
+    } catch (err) {
+      console.error("Dashboard loadForSession failed:", err);
+      if (ownerId) {
+        const u = sessionUserForUi(session);
+        if (u) setAuthUser(u);
+        setMerchant(null);
+        setPagers([]);
+      } else {
+        setAuthUser(null);
+        setMerchant({ ...DEFAULT_MERCHANT, id: "default" });
+        setPagers([]);
       }
+    } finally {
       setLoading(false);
-      return;
     }
-
-    sessionUserIdRef.current = sessionKey;
-    setLoading(true);
-    setPagers([]);
-    setShowNewOrder(false);
-    setNewPager(null);
-    setForceNextOrderOne(false);
-    setMerchant(null);
-    if (session?.user) {
-      setAuthUser(session.user);
-      let m = await getMerchantByUserId(session.user.id);
-      if (!m) {
-        m = await createMerchantForUser(session.user.id);
-      }
-      setMerchant(m ?? null);
-    } else {
-      setAuthUser(null);
-      const m = await getOrCreateAnonymousMerchant();
-      setMerchant(m);
-    }
-    setLoading(false);
   }, []);
+
+  const runBootstrapRetry = useCallback(() => {
+    setLoading(true);
+    (async () => {
+      let session: Session | null = null;
+      try {
+        const { data } = await withTimeout(
+          supabase.auth.getSession(),
+          GET_SESSION_TIMEOUT_MS,
+          "getSession"
+        );
+        session = data.session;
+      } catch (err) {
+        console.error("Dashboard retry getSession failed:", err);
+      }
+      try {
+        session = await enrichSessionWithUser(session);
+      } catch {
+        /* keep */
+      }
+      sessionUserIdRef.current = authIdentityKey(session);
+      setAuthUser(sessionUserForUi(session) ?? session?.user ?? null);
+      try {
+        await withTimeout(
+          loadForSession(session),
+          DASHBOARD_LOAD_TIMEOUT_MS,
+          "Dashboard load"
+        );
+      } catch (err) {
+        console.error("Dashboard retry load failed:", err);
+      }
+    })();
+  }, [loadForSession]);
 
   // Decide whether to show top/bottom chrome based on viewport size so that phones (portrait or landscape)
   // get a full-screen queue view, while tablets/desktops keep the bars. Also track phone-landscape layout.
@@ -120,33 +276,100 @@ export default function DashboardPage() {
     return () => window.removeEventListener("resize", updateChromeVisibility);
   }, []);
 
-  // Auth: on mount and whenever auth changes, load merchant/queue for the current user so the dashboard is never showing another user's data.
-  // Only set authChecking false after loadForSession completes so we never show the app with merchant still null.
+  // Auth: first load races INITIAL_SESSION vs getSession in the wild (Incognito, refresh). Use one
+  // `bootstrapComplete` per effect so only the first successful path runs; macrotask getSession catches
+  // missed INITIAL_SESSION. No `hydrated` gate — that left a black "Loading…" forever if auth never fired.
   useEffect(() => {
     let mounted = true;
-    (async () => {
-      const { data: { session } } = await supabase.auth.getSession();
+    let bootstrapComplete = false;
+
+    const runBootstrap = async (s: Session | null, source: string) => {
+      if (!mounted || bootstrapComplete) return;
+      bootstrapComplete = true;
+
+      let session = s;
+      try {
+        session = await enrichSessionWithUser(s);
+      } catch {
+        /* keep s */
+      }
+
+      const key = authIdentityKey(session);
+      sessionUserIdRef.current = key;
+      setAuthUser(sessionUserForUi(session) ?? session?.user ?? null);
+      authListenerReadyRef.current = true;
+
       if (!mounted) return;
-      await loadForSession(session);
-      if (mounted) setAuthChecking(false);
-    })();
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+
+      try {
+        await withTimeout(
+          loadForSession(session),
+          DASHBOARD_LOAD_TIMEOUT_MS,
+          "Dashboard load"
+        );
+      } catch (err) {
+        console.error(`Dashboard load failed (${source}):`, err);
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    };
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (event === "INITIAL_SESSION") {
+        await runBootstrap(session, "INITIAL_SESSION");
+        return;
+      }
+
       if (!mounted) return;
-      // Only reload when session identity actually changed. Supabase can fire with null/stale session when tab is backgrounded or on return, which would clear orders.
-      const newKey = session?.user?.id ?? "anon";
+      if (!authListenerReadyRef.current) return;
+
+      const newKey = authIdentityKey(session);
       if (newKey === sessionUserIdRef.current) return;
       if (session == null) {
-        const { data: { session: current } } = await supabase.auth.getSession();
-        if (current?.user?.id && current.user.id === sessionUserIdRef.current) return;
+        try {
+          const { data: { session: current } } = await withTimeout(
+            supabase.auth.getSession(),
+            GET_SESSION_TIMEOUT_MS,
+            "getSession"
+          );
+          if (authIdentityKey(current) === sessionUserIdRef.current) return;
+        } catch {
+          return;
+        }
       }
       await loadForSession(session);
     });
-    // When user returns to this tab, re-read session from storage. Only reload if session actually changed.
+
+    // Let INITIAL_SESSION (usually a microtask) run before this macrotask so we don’t bootstrap as anon
+    // while a signed-in session is still being emitted.
+    const deferredId = window.setTimeout(() => {
+      if (!mounted || bootstrapComplete) return;
+      void (async () => {
+        try {
+          const { data } = await withTimeout(
+            supabase.auth.getSession(),
+            GET_SESSION_TIMEOUT_MS,
+            "getSession"
+          );
+          let s = data.session;
+          try {
+            s = await enrichSessionWithUser(data.session);
+          } catch {
+            /* keep */
+          }
+          await runBootstrap(s, "getSession-deferred");
+        } catch (err) {
+          console.error("Dashboard getSession deferred failed:", err);
+          await runBootstrap(null, "getSession-deferred-error");
+        }
+      })();
+    }, 50);
+
     const onVisibilityChange = () => {
       if (document.visibilityState !== "visible" || !mounted) return;
       supabase.auth.getSession().then(({ data: { session } }) => {
         if (!mounted) return;
-        const newKey = session?.user?.id ?? "anon";
+        const newKey = authIdentityKey(session);
         if (newKey === sessionUserIdRef.current) return;
         loadForSession(session);
       });
@@ -154,6 +377,8 @@ export default function DashboardPage() {
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       mounted = false;
+      clearTimeout(deferredId);
+      authListenerReadyRef.current = false;
       document.removeEventListener("visibilitychange", onVisibilityChange);
       subscription.unsubscribe();
     };
@@ -274,30 +499,110 @@ export default function DashboardPage() {
     ? `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(pagerUrl)}`
     : "";
 
-  if (authChecking || !merchant) {
-    const signedInNoMerchant = !authChecking && authUser && !merchant;
+  const shellBg = "#171717";
+  const shellKeyline = "border-[#525252]";
+
+  // Signed in: show header + account menu immediately while merchant/pagers load (avoids black void after login).
+  if (authUser && !merchant && loading) {
+    return (
+      <div className="flex h-[100svh] min-h-0 flex-col overflow-hidden bg-zinc-950 text-white">
+        {showChrome && (
+          <div
+            className={`flex h-12 sm:h-[5.25rem] shrink-0 items-center justify-between border-b ${shellKeyline} px-3 py-1.5 sm:px-6 sm:py-4 w-full`}
+            style={{ backgroundColor: shellBg }}
+          >
+            <div className="flex w-32 shrink-0 items-center md:w-52 -mt-[14px] sm:-mt-[20px]">
+              <Link
+                href="/"
+                className="inline-flex items-center gap-1 text-xs sm:text-sm font-medium text-zinc-400 hover:text-white"
+                aria-label="Back to home"
+              >
+                <svg className="h-4 w-4 sm:h-5 sm:w-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+                </svg>
+                Back
+              </Link>
+            </div>
+            <div className="flex min-w-0 flex-1 items-center justify-center">
+              <span className="text-sm text-zinc-500">QReady</span>
+            </div>
+            <div className="flex w-40 shrink-0 items-center justify-end md:w-52">
+              <UserMenu user={authUser} hideDashboard brandBarColor={shellBg} className="-mt-[30px]" />
+            </div>
+          </div>
+        )}
+        <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-zinc-400">
+          <p>Loading your dashboard…</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Anonymous session: short full-screen load until anon merchant exists
+  if (!authUser && !merchant && loading) {
     return (
       <div className="flex min-h-[100svh] flex-col items-center justify-center gap-4 bg-zinc-950 px-6 text-white">
-        {signedInNoMerchant ? (
-          <>
-            <p className="text-center text-zinc-300">We couldn&apos;t load your dashboard.</p>
-            <button
-              type="button"
-              onClick={() => {
-                setAuthChecking(true);
-                supabase.auth.getSession().then(async ({ data: { session } }) => {
-                  await loadForSession(session);
-                  setAuthChecking(false);
-                });
-              }}
-              className="rounded-full bg-white px-6 py-2.5 text-sm font-semibold text-zinc-900 hover:bg-zinc-100"
-            >
-              Try again
-            </button>
-          </>
-        ) : (
-          <p className="text-zinc-400">Loading…</p>
-        )}
+        <p className="text-zinc-400">Loading…</p>
+      </div>
+    );
+  }
+
+  const signedInNoMerchant = authUser && !merchant && !loading;
+  const anonBootstrapFailed = !authUser && !merchant && !loading;
+  if (signedInNoMerchant || anonBootstrapFailed) {
+    return (
+      <div className="flex min-h-[100svh] flex-col items-center justify-center gap-4 bg-zinc-950 px-6 text-white">
+        <p className="text-center text-zinc-300">
+          {signedInNoMerchant
+            ? "We couldn&apos;t load your dashboard."
+            : "This is taking too long or the connection failed."}
+        </p>
+        <button
+          type="button"
+          onClick={runBootstrapRetry}
+          className="rounded-full bg-white px-6 py-2.5 text-sm font-semibold text-zinc-900 hover:bg-zinc-100"
+        >
+          Try again
+        </button>
+      </div>
+    );
+  }
+
+  if (!merchant) {
+    return (
+      <div className="flex min-h-[100svh] flex-col items-center justify-center gap-4 bg-zinc-950 px-6 text-white">
+        <p className="text-zinc-400">Loading…</p>
+      </div>
+    );
+  }
+
+  // Signed-in tenant rows use auth user id as merchant id; never show that queue without a confirmed user.
+  const tenantMerchantWithoutAuth =
+    merchant &&
+    !authUser &&
+    merchant.id !== "default" &&
+    !merchant.id.startsWith("anon-");
+  if (tenantMerchantWithoutAuth) {
+    return (
+      <div className="flex min-h-[100svh] flex-col items-center justify-center gap-4 bg-zinc-950 px-6 text-white">
+        <p className="max-w-md text-center text-zinc-300">
+          We couldn&apos;t confirm your sign-in. Your queue is hidden until you sign in again.
+        </p>
+        <div className="flex flex-wrap items-center justify-center gap-3">
+          <button
+            type="button"
+            onClick={runBootstrapRetry}
+            className="rounded-full bg-white px-6 py-2.5 text-sm font-semibold text-zinc-900 hover:bg-zinc-100"
+          >
+            Try again
+          </button>
+          <Link
+            href="/login"
+            className="rounded-full border border-zinc-600 px-6 py-2.5 text-sm font-semibold text-white hover:bg-zinc-800"
+          >
+            Log in
+          </Link>
+        </div>
       </div>
     );
   }

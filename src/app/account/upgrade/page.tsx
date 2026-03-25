@@ -4,6 +4,7 @@ import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { supabase } from "@/lib/supabase";
+import { withTimeout } from "@/lib/with-timeout";
 import { PaymentModal, type PaymentPlan } from "@/components/PaymentModal";
 
 function UpgradeContent() {
@@ -16,20 +17,32 @@ function UpgradeContent() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    let cancelled = false;
     (async () => {
-      const { data: { session: s } } = await supabase.auth.getSession();
-      if (!plan) {
-        router.replace(s ? "/account" : "/");
-        return;
+      try {
+        const { data } = await withTimeout(supabase.auth.getSession(), 12_000, "getSession");
+        if (cancelled) return;
+        const s = data.session;
+        if (!plan) {
+          router.replace(s ? "/account" : "/");
+          return;
+        }
+        if (!s) {
+          router.replace(`/signup?plan=${plan}`);
+          return;
+        }
+        setUserEmail(s.user?.email ?? null);
+        setAccessToken(s.access_token ?? null);
+      } catch (e) {
+        console.error("Upgrade page getSession failed:", e);
+        if (!cancelled) router.replace("/");
+      } finally {
+        if (!cancelled) setLoading(false);
       }
-      if (!s) {
-        router.replace(`/signup?plan=${plan}`);
-        return;
-      }
-      setUserEmail(s.user?.email ?? null);
-      setAccessToken(s.access_token ?? null);
-      setLoading(false);
     })();
+    return () => {
+      cancelled = true;
+    };
   }, [router, plan]);
 
   if (loading) {

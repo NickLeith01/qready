@@ -100,7 +100,8 @@ export async function getOrCreateAnonymousMerchant(): Promise<Merchant> {
     id = "anon-" + uuid;
     sessionStorage.setItem(ANON_STORAGE_KEY, id);
   }
-  await createMerchantForUser(id);
+  const created = await createMerchantForUser(id);
+  if (created) return created;
   const m = await getMerchant(id);
   return m ?? { ...DEFAULT_MERCHANT, id };
 }
@@ -202,8 +203,14 @@ export async function getMerchantByUserId(userId: string): Promise<Merchant | nu
   return toMerchant(data as Record<string, unknown>, userId);
 }
 
-/** Create a new merchant row for an auth user (id = userId). Call after signup so they have their own dashboard. */
+/**
+ * Ensure a merchant row exists for this id. Uses insert-if-missing only — never upsert partial rows,
+ * or every dashboard refresh would overwrite `business_name` and other fields with nulls.
+ */
 export async function createMerchantForUser(userId: string): Promise<Merchant | null> {
+  const existing = await getMerchantByUserId(userId);
+  if (existing) return existing;
+
   const row = {
     id: userId,
     plan: "free" as const,
@@ -211,13 +218,13 @@ export async function createMerchantForUser(userId: string): Promise<Merchant | 
   };
   let { data, error } = await supabase
     .from("merchants")
-    .upsert(row, { onConflict: "id" })
+    .insert(row)
     .select(MERCHANT_COLUMNS_FULL)
     .single();
   if (error && isPromoBannerColumnMissing(error)) {
     const res = await supabase
       .from("merchants")
-      .upsert(row, { onConflict: "id" })
+      .insert(row)
       .select(MERCHANT_COLUMNS_BASE)
       .single();
     if (!res.error && res.data) {
@@ -229,7 +236,7 @@ export async function createMerchantForUser(userId: string): Promise<Merchant | 
   if (error && isPromoBannerLinkColumnMissing(error)) {
     const res = await supabase
       .from("merchants")
-      .upsert(row, { onConflict: "id" })
+      .insert(row)
       .select(MERCHANT_COLUMNS_WITH_BANNER)
       .single();
     if (!res.error && res.data) {
@@ -241,7 +248,7 @@ export async function createMerchantForUser(userId: string): Promise<Merchant | 
   if (error && isStripeColumnMissing(error)) {
     const res = await supabase
       .from("merchants")
-      .upsert(row, { onConflict: "id" })
+      .insert(row)
       .select(MERCHANT_COLUMNS_FULL_NO_STRIPE)
       .single();
     if (!res.error && res.data) {
@@ -249,6 +256,11 @@ export async function createMerchantForUser(userId: string): Promise<Merchant | 
     }
     data = res.data;
     error = res.error;
+  }
+  const code = (error as { code?: string } | null)?.code;
+  const msg = error?.message ?? "";
+  if (error && (code === "23505" || msg.includes("duplicate key") || msg.includes("unique constraint"))) {
+    return getMerchantByUserId(userId);
   }
   if (error) {
     console.error("Error creating merchant for user:", error.message);

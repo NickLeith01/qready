@@ -34,6 +34,13 @@ function LoginContent() {
     }
   }, [searchParams]);
 
+  // Already signed in (e.g. browser Back landed on this page): send to dashboard so it never looks "signed out".
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session?.user) router.replace(getRedirectAfterLogin());
+    });
+  }, [router]);
+
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
@@ -44,7 +51,7 @@ function LoginContent() {
       setError(err.message);
       return;
     }
-    router.push(getRedirectAfterLogin());
+    router.replace(getRedirectAfterLogin());
     router.refresh();
   }
 

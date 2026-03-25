@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
+import { withTimeout } from "@/lib/with-timeout";
 import { getMerchantByUserId, createMerchantForUser } from "@/lib/merchant";
 import type { Merchant } from "@/types/merchant";
 import type { User } from "@supabase/supabase-js";
@@ -85,38 +86,58 @@ export default function AccountPage() {
   }
 
   useEffect(() => {
+    let cancelled = false;
+    const GET_SESSION_MS = 12_000;
+
     (async () => {
-      const { data: { session: s } } = await supabase.auth.getSession();
-      if (!s?.user) {
-        router.replace("/login");
-        return;
-      }
-      setUser(s.user);
-      setSession(s);
-      let m = await getMerchantByUserId(s.user.id);
-      // New users (e.g. sign up → payment without visiting dashboard) may have no merchant row; create so we can show account and sync plan from Stripe
-      if (!m && s.user.id) {
-        await createMerchantForUser(s.user.id);
-        m = await getMerchantByUserId(s.user.id);
-      }
-      setMerchant(m ?? null);
-      setLoading(false);
-      // Sync plan from Stripe (source of truth) so the UI matches even if webhooks were missed
       try {
-        const res = await fetch("/api/sync-plan", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${s.access_token}` },
-          body: JSON.stringify({ accessToken: s.access_token }),
-        });
-        const data = (await res.json().catch(() => ({}))) as { synced?: boolean; plan?: string };
-        if (data.synced && res.ok) {
-          m = await getMerchantByUserId(s.user.id);
-          setMerchant(m ?? null);
+        const { data } = await withTimeout(
+          supabase.auth.getSession(),
+          GET_SESSION_MS,
+          "getSession"
+        );
+        if (cancelled) return;
+        const s = data.session;
+        if (!s?.user) {
+          router.replace("/login");
+          return;
         }
-      } catch {
-        // Non-blocking: show current merchant even if sync fails
+        setUser(s.user);
+        setSession(s);
+        let m = await getMerchantByUserId(s.user.id);
+        if (cancelled) return;
+        if (!m && s.user.id) {
+          await createMerchantForUser(s.user.id);
+          if (cancelled) return;
+          m = await getMerchantByUserId(s.user.id);
+        }
+        if (cancelled) return;
+        setMerchant(m ?? null);
+        try {
+          const res = await fetch("/api/sync-plan", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${s.access_token}` },
+            body: JSON.stringify({ accessToken: s.access_token }),
+          });
+          const syncJson = (await res.json().catch(() => ({}))) as { synced?: boolean; plan?: string };
+          if (syncJson.synced && res.ok && !cancelled) {
+            m = await getMerchantByUserId(s.user.id);
+            setMerchant(m ?? null);
+          }
+        } catch {
+          // Non-blocking
+        }
+      } catch (e) {
+        console.error("Account page bootstrap failed:", e);
+        if (!cancelled) router.replace("/login");
+      } finally {
+        if (!cancelled) setLoading(false);
       }
     })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [router]);
 
   // Refetch merchant and subscription details when user returns to this tab
@@ -148,8 +169,33 @@ export default function AccountPage() {
     );
   }
 
-  if (!user || !merchant) {
+  if (!user) {
     return null;
+  }
+
+  if (!merchant) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center gap-4 bg-white px-6 text-zinc-900">
+        <p className="text-center text-zinc-600">We couldn&apos;t load your account. Check your connection and try again.</p>
+        <div className="flex flex-wrap items-center justify-center gap-3">
+          <button
+            type="button"
+            onClick={() => {
+              if (typeof window !== "undefined") window.location.reload();
+            }}
+            className="rounded-full bg-[#01a76c] px-6 py-2.5 text-sm font-semibold text-white hover:bg-[#018a5e]"
+          >
+            Reload page
+          </button>
+          <Link
+            href="/dashboard"
+            className="rounded-full border border-zinc-300 px-6 py-2.5 text-sm font-semibold text-zinc-700 hover:bg-zinc-50"
+          >
+            Back to dashboard
+          </Link>
+        </div>
+      </div>
+    );
   }
 
   const planLabel =
