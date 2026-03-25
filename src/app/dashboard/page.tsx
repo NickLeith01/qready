@@ -1036,6 +1036,10 @@ export default function DashboardPage() {
         <SettingsModal
           merchant={merchant}
           onClose={() => setSettingsOpen(false)}
+          onPersistPatch={async (patch) => {
+            const updated = await updateMerchant({ ...patch, id: merchant.id, plan: merchant.plan });
+            setMerchant((prev) => (prev ? { ...prev, ...patch, ...(updated ?? {}) } : updated ?? null));
+          }}
           onSave={async (updates) => {
             const updated = await updateMerchant({ ...updates, id: merchant.id, plan: merchant.plan });
             setMerchant((prev) => (prev ? { ...prev, ...updates, ...(updated ?? {}) } : updated ?? null));
@@ -1051,10 +1055,13 @@ function SettingsModal({
   merchant,
   onClose,
   onSave,
+  onPersistPatch,
 }: {
   merchant: Merchant;
   onClose: () => void;
   onSave: (updates: Partial<Merchant>) => Promise<void>;
+  /** Save a partial row without closing the modal (e.g. right after storage upload). */
+  onPersistPatch: (patch: Partial<Merchant>) => Promise<void>;
 }) {
   const isPaid = merchant.plan === "plus" || merchant.plan === "premium" || merchant.plan === "paid";
   const isPremium = merchant.plan === "premium" || merchant.plan === "paid";
@@ -1173,7 +1180,10 @@ function SettingsModal({
                       setLogoUploading(true);
                       try {
                         const url = await uploadLogo(file);
-                        if (url) setLogoUrl(url);
+                        if (url) {
+                          setLogoUrl(url);
+                          await onPersistPatch({ logo_url: url });
+                        }
                       } catch (err) {
                         const msg = err instanceof Error ? err.message : String(err);
                         alert(`Logo upload failed: ${msg}`);
@@ -1284,7 +1294,10 @@ function SettingsModal({
                       setBannerUploading(true);
                       try {
                         const url = await uploadBanner(file);
-                        if (url) setPromoBannerUrl(url);
+                        if (url) {
+                          setPromoBannerUrl(url);
+                          await onPersistPatch({ promo_banner_url: url });
+                        }
                       } catch (err) {
                         const msg = err instanceof Error ? err.message : String(err);
                         alert(`Banner upload failed: ${msg}`);

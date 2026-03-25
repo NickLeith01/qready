@@ -106,43 +106,58 @@ export async function getOrCreateAnonymousMerchant(): Promise<Merchant> {
   return m ?? { ...DEFAULT_MERCHANT, id };
 }
 
+/** PATCH-style fields only — never whole-row replace (upsert can wipe columns not sent, e.g. name/tagline on refresh). */
+function merchantPatchFromUpdates(updates: Partial<Merchant>): Record<string, unknown> {
+  const row: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  for (const [k, v] of Object.entries(updates)) {
+    if (k === "id") continue;
+    if (v === undefined) continue;
+    row[k] = v;
+  }
+  return row;
+}
+
 export async function updateMerchant(updates: Partial<Merchant>): Promise<Merchant | null> {
   const id = updates.id ?? MERCHANT_ID;
-  const row: Record<string, unknown> = { id, ...updates, updated_at: new Date().toISOString() };
-  if (updates.plan !== undefined) row.plan = updates.plan;
-  let { data, error } = await supabase
+  const patch = merchantPatchFromUpdates(updates);
+
+  let first = await supabase
     .from("merchants")
-    .upsert(row, { onConflict: "id" })
+    .update(patch)
+    .eq("id", id)
     .select(MERCHANT_COLUMNS_FULL)
-    .single();
+    .maybeSingle();
+  let data: Record<string, unknown> | null = first.data as Record<string, unknown> | null;
+  let error = first.error;
+
   if (error && isPromoBannerColumnMissing(error)) {
     const { promo_banner_url: _drop, ...rest } = updates;
-    const rowWithoutBanner: Record<string, unknown> = { id, ...rest, updated_at: new Date().toISOString() };
-    if (updates.plan !== undefined) rowWithoutBanner.plan = updates.plan;
+    const p = merchantPatchFromUpdates(rest);
     const res = await supabase
       .from("merchants")
-      .upsert(rowWithoutBanner, { onConflict: "id" })
+      .update(p)
+      .eq("id", id)
       .select(MERCHANT_COLUMNS_BASE)
-      .single();
+      .maybeSingle();
     if (!res.error && res.data) {
       return toMerchant({ ...res.data, promo_banner_url: null, promo_banner_link: null } as Record<string, unknown>, id);
     }
-    data = res.data;
+    data = res.data as Record<string, unknown> | null;
     error = res.error;
   }
   if (error && isPromoBannerLinkColumnMissing(error)) {
     const { promo_banner_link: _dropLink, ...rest } = updates;
-    const rowWithoutBannerLink: Record<string, unknown> = { id, ...rest, updated_at: new Date().toISOString() };
-    if (updates.plan !== undefined) rowWithoutBannerLink.plan = updates.plan;
+    const p = merchantPatchFromUpdates(rest);
     const res = await supabase
       .from("merchants")
-      .upsert(rowWithoutBannerLink, { onConflict: "id" })
+      .update(p)
+      .eq("id", id)
       .select(MERCHANT_COLUMNS_WITH_BANNER)
-      .single();
+      .maybeSingle();
     if (!res.error && res.data) {
       return toMerchant({ ...res.data, promo_banner_link: null } as Record<string, unknown>, id);
     }
-    data = res.data;
+    data = res.data as Record<string, unknown> | null;
     error = res.error;
   }
   if (error) {
@@ -153,6 +168,10 @@ export async function updateMerchant(updates: Partial<Merchant>): Promise<Mercha
       console.error("Error updating merchant:", error.message);
     }
     return null;
+  }
+  if (!data) {
+    const recovered = await getMerchantByUserId(id);
+    return recovered;
   }
   return toMerchant(data as Record<string, unknown>, id);
 }

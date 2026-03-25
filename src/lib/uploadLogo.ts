@@ -45,7 +45,10 @@ export async function uploadLogo(file: File): Promise<string | null> {
     throw new Error(error.message);
   }
   const { data } = supabase.storage.from(BUCKET).getPublicUrl(path);
-  return data.publicUrl;
+  // Same path → same URL; without a new query string browsers keep showing the previous file after upsert.
+  const u = new URL(data.publicUrl);
+  u.searchParams.set("v", String(Date.now()));
+  return u.toString();
 }
 
 const BANNER_EXT_TO_MIME: Record<string, string> = {
@@ -89,5 +92,7 @@ export async function uploadBanner(file: File): Promise<string | null> {
     throw new Error(error.message);
   }
   const { data } = supabase.storage.from(BUCKET).getPublicUrl(path);
-  return data.publicUrl;
+  const u = new URL(data.publicUrl);
+  u.searchParams.set("v", String(Date.now()));
+  return u.toString();
 }
