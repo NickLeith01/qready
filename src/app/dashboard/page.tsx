@@ -466,15 +466,20 @@ export default function DashboardPage() {
 
   async function handleResetNumbers() {
     if (!merchant?.id) return;
-    await supabase
-      .from("pagers")
-      .delete()
-      .eq("merchant_id", merchant.id);
+    const { error } = await supabase.from("pagers").delete().eq("merchant_id", merchant.id);
+    if (error) {
+      console.error("Reset board (delete pagers) failed:", error.message, error);
+      alert(
+        `Could not clear the board: ${error.message}\n\n` +
+          "If you use Supabase row-level security, add a DELETE policy on public.pagers for your staff (see supabase/migrations/20250325150000_pagers_delete_reset.sql)."
+      );
+      return;
+    }
     setForceNextOrderOne(true);
     setPagers([]);
     setShowNewOrder(false);
     setNewPager(null);
-    fetchPagers();
+    await fetchPagers();
   }
 
   const waiting = pagers.filter((p) => p.status === "waiting");
