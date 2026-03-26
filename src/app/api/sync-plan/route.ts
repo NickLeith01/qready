@@ -47,6 +47,21 @@ export async function POST(request: Request) {
     let stripeCustomerId = (merchantRow as { stripe_customer_id?: string } | null)?.stripe_customer_id ?? null;
     const currentPlan = (merchantRow as { plan?: string } | null)?.plan ?? "free";
 
+    // Recover if we stored a Stripe customer id that does not exist in the current Stripe account
+    // (test/live mismatch, deleted customer, etc.).
+    if (stripeCustomerId) {
+      try {
+        await stripe.customers.retrieve(stripeCustomerId);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (msg.includes("No such customer") || msg.includes("resource_missing")) {
+          stripeCustomerId = null;
+        } else {
+          throw e;
+        }
+      }
+    }
+
     // If merchant has no stripe_customer_id (e.g. new user paid before merchant row existed), try to find Stripe customer by email and link + sync
     let subscription: Stripe.Subscription | null = null;
     if (!stripeCustomerId && user.email) {

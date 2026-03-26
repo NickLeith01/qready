@@ -64,6 +64,22 @@ export async function POST(request: Request) {
 
     stripeCustomerId = (merchantRow as { stripe_customer_id?: string } | null)?.stripe_customer_id ?? null;
 
+    // If we previously saved a Stripe customer id but it no longer exists in this Stripe account
+    // (test/live mismatch, deleted customer, etc.), Stripe will throw "No such customer".
+    // Recover by creating a fresh Stripe customer and updating `merchants`.
+    if (stripeCustomerId) {
+      try {
+        await stripe.customers.retrieve(stripeCustomerId);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (msg.includes("No such customer") || msg.includes("resource_missing")) {
+          stripeCustomerId = null;
+        } else {
+          throw e;
+        }
+      }
+    }
+
     if (!stripeCustomerId) {
       const customer = await stripe.customers.create({
         email: user.email ?? undefined,
