@@ -1,6 +1,19 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import type Stripe from "stripe";
 import { getStripe, getPriceId } from "@/lib/stripe-server";
+
+function subscriptionItemPriceId(sub: Stripe.Subscription): string | null {
+  const p = sub.items?.data?.[0]?.price;
+  if (!p) return null;
+  return typeof p === "string" ? p : p.id;
+}
+
+function paymentIntentUsable(pi: Stripe.PaymentIntent): boolean {
+  if (!pi.client_secret) return false;
+  if (pi.status === "canceled" || pi.status === "succeeded") return false;
+  return true;
+}
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
 const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "";
@@ -99,13 +112,40 @@ export async function POST(request: Request) {
       await stripe.subscriptions.cancel(sub.id);
     }
 
-    // Abandoned checkouts leave status=incomplete; cancel them so each retry does not add another row in Stripe
+    // Reuse one incomplete sub for this price when the Payment Intent is still good — avoids a new Stripe row on every modal open.
     const incomplete = await stripe.subscriptions.list({
       customer: stripeCustomerId,
       status: "incomplete",
       limit: 100,
     });
+
     for (const sub of incomplete.data) {
+      if (subscriptionItemPriceId(sub) !== priceId) {
+        await stripe.subscriptions.cancel(sub.id);
+      }
+    }
+
+    const samePlanIncomplete = incomplete.data
+      .filter((s) => subscriptionItemPriceId(s) === priceId)
+      .sort((a, b) => b.created - a.created);
+
+    for (const sub of samePlanIncomplete) {
+      const full = await stripe.subscriptions.retrieve(sub.id, {
+        expand: ["latest_invoice.payment_intent"],
+      });
+      const inv = full.latest_invoice as
+        | (Stripe.Invoice & { payment_intent?: Stripe.PaymentIntent | string | null })
+        | null;
+      const rawPi = inv?.payment_intent;
+      let pi: Stripe.PaymentIntent | null = null;
+      if (typeof rawPi === "string") {
+        pi = await stripe.paymentIntents.retrieve(rawPi);
+      } else if (rawPi && typeof rawPi === "object") {
+        pi = rawPi;
+      }
+      if (pi && paymentIntentUsable(pi)) {
+        return NextResponse.json({ clientSecret: pi.client_secret, subscriptionId: full.id });
+      }
       await stripe.subscriptions.cancel(sub.id);
     }
 
