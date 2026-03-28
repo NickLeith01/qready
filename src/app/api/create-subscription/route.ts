@@ -99,6 +99,16 @@ export async function POST(request: Request) {
       await stripe.subscriptions.cancel(sub.id);
     }
 
+    // Abandoned checkouts leave status=incomplete; cancel them so each retry does not add another row in Stripe
+    const incomplete = await stripe.subscriptions.list({
+      customer: stripeCustomerId,
+      status: "incomplete",
+      limit: 100,
+    });
+    for (const sub of incomplete.data) {
+      await stripe.subscriptions.cancel(sub.id);
+    }
+
     const subscription = await stripe.subscriptions.create({
       customer: stripeCustomerId,
       items: [{ price: priceId }],
