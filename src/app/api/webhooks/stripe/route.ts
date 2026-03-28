@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import Stripe from "stripe";
-import { getStripe, planFromSubscription } from "@/lib/stripe-server";
+import { getStripe, planFromSubscription, subscriptionGrantsPaidPlan } from "@/lib/stripe-server";
 
 const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET ?? "";
 
@@ -32,6 +32,9 @@ export async function POST(request: Request) {
 
   if (event.type === "customer.subscription.created" || event.type === "customer.subscription.updated") {
     const subscription = event.data.object as Stripe.Subscription;
+    if (!subscriptionGrantsPaidPlan(subscription)) {
+      return NextResponse.json({ received: true });
+    }
     const customerId = typeof subscription.customer === "string" ? subscription.customer : subscription.customer?.id;
     const plan = planFromSubscription(subscription);
     const merchantIdFromMeta = subscription.metadata?.merchant_id as string | undefined;
